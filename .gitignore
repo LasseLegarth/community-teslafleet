@@ -1,9 +1,10 @@
-# Local config & captured templates may contain VIN / personal data
-config.yaml
-config.*.yaml
-!config.example.yaml
-templates/*.json
-!templates/*.example.json
+# Local runtime config (root only) — may contain VIN / personal data.
+# Anchored with a leading slash so it does NOT match ha-addon/config.yaml.
+/config.yaml
+/config.*.yaml
+!/config.example.yaml
+/templates/*.json
+!/templates/*.example.json
 
 # Secrets & runtime state — never commit
 .env

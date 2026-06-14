@@ -1,0 +1,44 @@
+# Home Assistant add-on manifest. Wraps the SAME multi-arch GHCR image — the gateway
+# binary reads HA's /data/options.json directly (no run.sh/bashio needed; stays
+# distroless). MQTT broker is auto-detected from the Supervisor (services: mqtt:want
+# + hassio_api). Config is done in HA's native add-on options form below.
+#
+# NOTE: `version` is overwritten by the release workflow to match the published image tag.
+name: Community TeslaFleet
+version: "0.1.0"
+slug: community_teslafleet
+description: Self-hosted Tesla Fleet Telemetry → Home Assistant (+ optional TeslaMate Fleet API)
+url: https://github.com/legarth/community-teslafleet
+image: ghcr.io/legarth/community-teslafleet   # single multi-arch manifest (no {arch})
+arch:
+  - aarch64
+  - amd64
+init: false
+hassio_api: true            # required to read the MQTT service from the Supervisor
+services:
+  - mqtt:want               # auto-use HA's MQTT broker if present (don't block if absent)
+panel_icon: mdi:car-electric
+ports:
+  "4460/tcp": 4460          # Fleet API + WSS for TeslaMate (set null if HA-only)
+ports_description:
+  "4460/tcp": Fleet API + WSS for TeslaMate (LAN-only; leave unset if not using TeslaMate)
+options:
+  zmq_addr: "tcp://fleet-telemetry:5284"
+  namespace: "tesla_telemetry"
+  units_system: metric
+  device_identifier: name
+  telemetry_profile: balanced
+  fleetapi_enabled: false
+  vins: ""
+  commands_enabled: false
+  log_level: info
+schema:
+  zmq_addr: str
+  namespace: str
+  units_system: list(metric|imperial)
+  device_identifier: list(name|vin)
+  telemetry_profile: list(eco|balanced|live|custom)
+  fleetapi_enabled: bool
+  vins: str
+  commands_enabled: bool
+  log_level: list(debug|info|warn|error)
