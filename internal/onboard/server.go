@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/legarth/community-teslafleet/internal/enroll"
+	"github.com/LasseLegarth/community-teslafleet/internal/enroll"
 )
 
 //go:embed templates/*.html

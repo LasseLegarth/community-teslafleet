@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/legarth/community-teslafleet/internal/config"
-	"github.com/legarth/community-teslafleet/internal/store"
+	"github.com/LasseLegarth/community-teslafleet/internal/config"
+	"github.com/LasseLegarth/community-teslafleet/internal/store"
 )
 
 // Entity is a command entity exposed in Home Assistant.

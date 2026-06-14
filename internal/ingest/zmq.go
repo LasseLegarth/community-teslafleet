@@ -17,9 +17,9 @@ import (
 
 	"github.com/go-zeromq/zmq4"
 
-	"github.com/legarth/community-teslafleet/internal/config"
-	"github.com/legarth/community-teslafleet/internal/recorder"
-	"github.com/legarth/community-teslafleet/internal/store"
+	"github.com/LasseLegarth/community-teslafleet/internal/config"
+	"github.com/LasseLegarth/community-teslafleet/internal/recorder"
+	"github.com/LasseLegarth/community-teslafleet/internal/store"
 )
 
 type Consumer struct {

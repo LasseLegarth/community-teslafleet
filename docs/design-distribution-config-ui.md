@@ -75,7 +75,7 @@ vises kun via **ingress** (til onboarding).
 name: Community TeslaFleet
 version: <skrives af release-workflow = image-tag>
 slug: community_teslafleet
-image: "ghcr.io/legarth/community-teslafleet"   # ÉT multi-arch manifest (ingen {arch})
+image: "ghcr.io/lasselegarth/community-teslafleet"   # ÉT multi-arch manifest (ingen {arch})
 arch: [aarch64, amd64]
 init: false
 hassio_api: true            # KRÆVET for at hente MQTT fra Supervisor (ellers 403)

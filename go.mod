@@ -1,4 +1,4 @@
-module github.com/legarth/community-teslafleet
+module github.com/LasseLegarth/community-teslafleet
 
 go 1.25
 

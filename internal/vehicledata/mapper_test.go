@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/legarth/community-teslafleet/internal/config"
-	"github.com/legarth/community-teslafleet/internal/store"
+	"github.com/LasseLegarth/community-teslafleet/internal/config"
+	"github.com/LasseLegarth/community-teslafleet/internal/store"
 )
 
 func TestBuild_OverlayAndUnits(t *testing.T) {

@@ -13,16 +13,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/legarth/community-teslafleet/internal/commands"
-	"github.com/legarth/community-teslafleet/internal/config"
-	"github.com/legarth/community-teslafleet/internal/fleetapi"
-	"github.com/legarth/community-teslafleet/internal/hadiscovery"
-	"github.com/legarth/community-teslafleet/internal/ingest"
-	"github.com/legarth/community-teslafleet/internal/onboard"
-	"github.com/legarth/community-teslafleet/internal/recorder"
-	"github.com/legarth/community-teslafleet/internal/store"
-	"github.com/legarth/community-teslafleet/internal/vehicledata"
-	"github.com/legarth/community-teslafleet/internal/wss"
+	"github.com/LasseLegarth/community-teslafleet/internal/commands"
+	"github.com/LasseLegarth/community-teslafleet/internal/config"
+	"github.com/LasseLegarth/community-teslafleet/internal/fleetapi"
+	"github.com/LasseLegarth/community-teslafleet/internal/hadiscovery"
+	"github.com/LasseLegarth/community-teslafleet/internal/ingest"
+	"github.com/LasseLegarth/community-teslafleet/internal/onboard"
+	"github.com/LasseLegarth/community-teslafleet/internal/recorder"
+	"github.com/LasseLegarth/community-teslafleet/internal/store"
+	"github.com/LasseLegarth/community-teslafleet/internal/vehicledata"
+	"github.com/LasseLegarth/community-teslafleet/internal/wss"
 )
 
 func main() {

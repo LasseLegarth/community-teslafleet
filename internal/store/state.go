@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/legarth/community-teslafleet/internal/config"
+	"github.com/LasseLegarth/community-teslafleet/internal/config"
 )
 
 // Derived is the high-level interpretation of a snapshot.

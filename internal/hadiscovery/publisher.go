@@ -9,9 +9,9 @@ import (
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 
-	"github.com/legarth/community-teslafleet/internal/commands"
-	"github.com/legarth/community-teslafleet/internal/config"
-	"github.com/legarth/community-teslafleet/internal/store"
+	"github.com/LasseLegarth/community-teslafleet/internal/commands"
+	"github.com/LasseLegarth/community-teslafleet/internal/config"
+	"github.com/LasseLegarth/community-teslafleet/internal/store"
 )
 
 // Publisher connects to Home Assistant's MQTT broker, publishes retained

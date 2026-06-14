@@ -12,10 +12,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/legarth/community-teslafleet/internal/commands"
-	"github.com/legarth/community-teslafleet/internal/config"
-	"github.com/legarth/community-teslafleet/internal/store"
-	"github.com/legarth/community-teslafleet/internal/vehicledata"
+	"github.com/LasseLegarth/community-teslafleet/internal/commands"
+	"github.com/LasseLegarth/community-teslafleet/internal/config"
+	"github.com/LasseLegarth/community-teslafleet/internal/store"
+	"github.com/LasseLegarth/community-teslafleet/internal/vehicledata"
 )
 
 type Server struct {

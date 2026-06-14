@@ -3,8 +3,8 @@ package hadiscovery
 import (
 	"testing"
 
-	"github.com/legarth/community-teslafleet/internal/config"
-	"github.com/legarth/community-teslafleet/internal/store"
+	"github.com/LasseLegarth/community-teslafleet/internal/config"
+	"github.com/LasseLegarth/community-teslafleet/internal/store"
 )
 
 func TestHumanize(t *testing.T) {

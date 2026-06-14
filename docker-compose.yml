@@ -46,7 +46,7 @@ services:
       - "127.0.0.1:4443:4443"                             # loopback only
 
   gateway:
-    image: ghcr.io/legarth/community-teslafleet:latest    # or: build: .
+    image: ghcr.io/lasselegarth/community-teslafleet:latest    # or: build: .
     restart: unless-stopped
     depends_on: [fleet-telemetry]
     ports:

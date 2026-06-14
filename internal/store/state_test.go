@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/legarth/community-teslafleet/internal/config"
+	"github.com/LasseLegarth/community-teslafleet/internal/config"
 )
 
 func TestDerive_State(t *testing.T) {

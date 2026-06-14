@@ -5,8 +5,8 @@ package vehicledata
 import (
 	"time"
 
-	"github.com/legarth/community-teslafleet/internal/config"
-	"github.com/legarth/community-teslafleet/internal/store"
+	"github.com/LasseLegarth/community-teslafleet/internal/config"
+	"github.com/LasseLegarth/community-teslafleet/internal/store"
 )
 
 // Build produces the vehicle_data "response" object for a vehicle. It clones the

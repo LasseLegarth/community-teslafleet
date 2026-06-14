@@ -7,7 +7,7 @@
 
 services:
   gateway:
-    image: ghcr.io/legarth/community-teslafleet:latest
+    image: ghcr.io/lasselegarth/community-teslafleet:latest
     # build: .          # uncomment to build locally instead of pulling
     restart: unless-stopped
     ports:

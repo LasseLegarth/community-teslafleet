@@ -5,9 +5,9 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/legarth/community-teslafleet/internal/config"
-	"github.com/legarth/community-teslafleet/internal/store"
-	"github.com/legarth/community-teslafleet/internal/vehicledata"
+	"github.com/LasseLegarth/community-teslafleet/internal/config"
+	"github.com/LasseLegarth/community-teslafleet/internal/store"
+	"github.com/LasseLegarth/community-teslafleet/internal/vehicledata"
 )
 
 // entity describes one Home Assistant entity exposed via MQTT discovery. All

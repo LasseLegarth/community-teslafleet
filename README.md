@@ -53,7 +53,7 @@ gateway is only an MQTT *client* when publishing to Home Assistant's broker.
 
 ### Home Assistant add-on (easiest for HA users)
 Add this repo as an add-on repository (Settings → Add-ons → ⋮ → Repositories →
-`https://github.com/legarth/community-teslafleet`), install **Community TeslaFleet**,
+`https://github.com/LasseLegarth/community-teslafleet`), install **Community TeslaFleet**,
 and configure it in the **Configuration** tab. The MQTT broker is auto-detected from
 HA. Requires HA OS / Supervised. (HA Container/Core → use standalone below.)
 
