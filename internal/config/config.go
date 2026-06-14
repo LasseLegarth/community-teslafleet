@@ -1,12 +1,16 @@
-// Package config loads gateway configuration from a YAML file with environment
-// variable overrides. Everything is config-driven so the project is generic and
-// distributable — no hardcoded IPs, VINs or unit assumptions.
+// Package config loads gateway configuration. The same binary runs as a Home
+// Assistant add-on and standalone, so config is layered:
 //
-// Ingest is brokerless: fleet-telemetry's ZMQ dispatcher PUB-binds an address and
-// the gateway SUB-connects. Egress to Home Assistant is a normal MQTT client.
+//	defaults → config.yaml (if mounted) → /data/options.json (HA add-on) → env (TGW_*)
+//
+// LoadRaw returns this layered config WITHOUT runtime derivation — use it for
+// editing/persisting (Save). Load additionally validates and resolves derived
+// runtime fields (vehicle ids, display-name fallback). Persisting raw config keeps
+// derived values (and the VIN, which is PII) out of the written file.
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -16,17 +20,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// SchemaVersion is the current config schema. Bumped when a migration is needed;
+// migrate() upgrades older files on load.
+const SchemaVersion = 1
+
 type Config struct {
-	Ingest   Ingest    `yaml:"ingest"`
-	HTTP     HTTP      `yaml:"http"`
-	FleetAPI FleetAPI  `yaml:"fleetapi"`
-	HA       HA        `yaml:"ha"`
-	Commands Commands  `yaml:"commands"`
-	Vehicles  []Vehicle `yaml:"vehicles"`
-	Units     Units     `yaml:"units"`
-	State     State     `yaml:"state"`
-	Recording Recording `yaml:"recording"`
-	LogLevel  string    `yaml:"log_level"`
+	SchemaVersion int       `yaml:"schema_version"`
+	Ingest        Ingest    `yaml:"ingest"`
+	HTTP          HTTP      `yaml:"http"`
+	FleetAPI      FleetAPI  `yaml:"fleetapi"`
+	HA            HA        `yaml:"ha"`
+	Commands      Commands  `yaml:"commands"`
+	Vehicles      []Vehicle `yaml:"vehicles"`
+	Units         Units     `yaml:"units"`
+	State         State     `yaml:"state"`
+	Recording     Recording `yaml:"recording"`
+	LogLevel      string    `yaml:"log_level"`
 }
 
 // Recording appends every telemetry field update to a JSONL file for debugging
@@ -191,12 +200,13 @@ type State struct {
 
 func Defaults() Config {
 	return Config{
-		Ingest:   Ingest{ZMQAddr: "tcp://fleet-telemetry:5284", Namespace: "tesla_telemetry"},
-		HTTP:     HTTP{Listen: ":4460"},
-		FleetAPI: FleetAPI{Enabled: true},
+		SchemaVersion: SchemaVersion,
+		Ingest:        Ingest{ZMQAddr: "tcp://fleet-telemetry:5284", Namespace: "tesla_telemetry"},
+		HTTP:          HTTP{Listen: ":4460"},
+		FleetAPI:      FleetAPI{Enabled: true},
 		HA: HA{
-			Enabled:         true,
-			ClientID:        "community-teslafleet",
+			Enabled:                true,
+			ClientID:               "community-teslafleet",
 			DiscoveryPrefix:        "homeassistant",
 			StateTopicBase:         "tgw",
 			PublishIntervalSeconds: 2,
@@ -219,9 +229,10 @@ func Defaults() Config {
 	}
 }
 
-// Load reads the YAML file at path (if it exists) over defaults, then applies
-// TGW_* environment overrides. A missing file is not an error.
-func Load(path string) (Config, error) {
+// LoadRaw layers defaults → config.yaml → /data/options.json (HA add-on) → env, WITHOUT
+// validation or runtime derivation. Use it for editing and persisting (Save), so derived
+// ids/names (and the VIN) never leak into the written file. A missing file is not an error.
+func LoadRaw(path string) (Config, error) {
 	cfg := Defaults()
 	if path != "" {
 		if b, err := os.ReadFile(path); err == nil {
@@ -232,11 +243,134 @@ func Load(path string) (Config, error) {
 			return cfg, fmt.Errorf("read config %s: %w", path, err)
 		}
 	}
+	migrate(&cfg)
+	applyOptions(&cfg) // HA add-on options.json (no-op when absent, e.g. standalone)
 	applyEnv(&cfg)
+	return cfg, nil
+}
+
+// Load returns the runtime config: LoadRaw, then validate (errors only) and resolve
+// (derive vehicle ids + display-name fallback). main() uses this.
+func Load(path string) (Config, error) {
+	cfg, err := LoadRaw(path)
+	if err != nil {
+		return cfg, err
+	}
 	if err := cfg.validate(); err != nil {
 		return cfg, err
 	}
+	cfg.resolve()
 	return cfg, nil
+}
+
+// Save writes cfg to path atomically (tmp + rename, 0600). Callers should pass a RAW
+// (un-resolved) config — e.g. from LoadRaw — so derived ids/names are not persisted.
+func Save(path string, cfg Config) error {
+	if cfg.SchemaVersion == 0 {
+		cfg.SchemaVersion = SchemaVersion
+	}
+	b, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename %s: %w", path, err)
+	}
+	return nil
+}
+
+const secretMask = "••••"
+
+// Redact returns a copy of cfg with secret fields masked, safe to expose to a UI/status
+// endpoint. Nested structs are values, so the copy does not alias the original's secrets.
+func (cfg Config) Redact() Config {
+	mask := func(s string) string {
+		if s == "" {
+			return ""
+		}
+		return secretMask
+	}
+	cfg.HA.Password = mask(cfg.HA.Password)
+	cfg.Commands.ClientSecret = mask(cfg.Commands.ClientSecret)
+	cfg.Commands.RefreshToken = mask(cfg.Commands.RefreshToken)
+	cfg.Commands.ValetPIN = mask(cfg.Commands.ValetPIN)
+	cfg.Commands.SpeedLimitPIN = mask(cfg.Commands.SpeedLimitPIN)
+	cfg.Commands.PinToDrivePIN = mask(cfg.Commands.PinToDrivePIN)
+	return cfg
+}
+
+// MergeSecrets fills masked secret fields in `in` (a config coming back from a UI) with
+// the values from `existing`, so a redacted "••••" round-tripped from the UI does not
+// blank the stored secret. Non-masked values overwrite (genuine changes).
+func MergeSecrets(in *Config, existing Config) {
+	keep := func(field *string, old string) {
+		if *field == secretMask {
+			*field = old
+		}
+	}
+	keep(&in.HA.Password, existing.HA.Password)
+	keep(&in.Commands.ClientSecret, existing.Commands.ClientSecret)
+	keep(&in.Commands.RefreshToken, existing.Commands.RefreshToken)
+	keep(&in.Commands.ValetPIN, existing.Commands.ValetPIN)
+	keep(&in.Commands.SpeedLimitPIN, existing.Commands.SpeedLimitPIN)
+	keep(&in.Commands.PinToDrivePIN, existing.Commands.PinToDrivePIN)
+}
+
+// migrate upgrades an older config in place. No migrations yet; stamps the version.
+func migrate(c *Config) {
+	if c.SchemaVersion == 0 {
+		// Pre-versioned file: treat as current (no structural changes have shipped).
+		c.SchemaVersion = SchemaVersion
+	}
+	// Future: switch on c.SchemaVersion to transform old layouts, then bump.
+}
+
+// applyOptions overlays a Home Assistant add-on options.json (flat key/value) onto the
+// config. Absent (standalone) → no-op. The mapping is the small set of keys exposed in
+// the add-on's options schema; everything else is configured via env or config.yaml.
+func applyOptions(c *Config) {
+	path := os.Getenv("TGW_OPTIONS_FILE")
+	if path == "" {
+		path = "/data/options.json"
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var o map[string]any
+	if json.Unmarshal(b, &o) != nil {
+		return
+	}
+	optStr(o, "units_system", &c.Units.System)
+	optStr(o, "device_identifier", &c.HA.IdentifierMode)
+	optStr(o, "log_level", &c.LogLevel)
+	optStr(o, "mqtt_broker", &c.HA.Broker)
+	optStr(o, "mqtt_username", &c.HA.Username)
+	optStr(o, "mqtt_password", &c.HA.Password)
+	optBool(o, "commands_enabled", &c.Commands.Enabled)
+	optStr(o, "tesla_client_id", &c.Commands.ClientID)
+	optStr(o, "tesla_client_secret", &c.Commands.ClientSecret)
+	optStr(o, "tesla_refresh_token", &c.Commands.RefreshToken)
+	optStr(o, "fleet_api_url", &c.Commands.FleetAPIURL)
+	if v, ok := o["vins"].(string); ok && strings.TrimSpace(v) != "" && len(c.Vehicles) == 0 {
+		c.Vehicles = parseVINs(v, "")
+	}
+}
+
+func optStr(o map[string]any, key string, dst *string) {
+	if v, ok := o[key].(string); ok && v != "" {
+		*dst = v
+	}
+}
+
+func optBool(o map[string]any, key string, dst *bool) {
+	if v, ok := o[key].(bool); ok {
+		*dst = v
+	}
 }
 
 func applyEnv(c *Config) {
@@ -281,22 +415,32 @@ func applyEnv(c *Config) {
 
 	if len(c.Vehicles) == 0 {
 		if v := os.Getenv("TGW_VINS"); v != "" {
-			dir := os.Getenv("TGW_TEMPLATE_DIR")
-			for _, vin := range strings.Split(v, ",") {
-				vin = strings.TrimSpace(vin)
-				if vin == "" {
-					continue
-				}
-				veh := Vehicle{VIN: vin}
-				if dir != "" {
-					veh.Template = strings.TrimRight(dir, "/") + "/" + vin + ".json"
-				}
-				c.Vehicles = append(c.Vehicles, veh)
-			}
+			c.Vehicles = parseVINs(v, os.Getenv("TGW_TEMPLATE_DIR"))
 		}
 	}
 }
 
+// parseVINs turns a comma-separated VIN list into vehicles, optionally pointing each at
+// a template under dir. Shared by env (TGW_VINS) and add-on options (vins).
+func parseVINs(list, dir string) []Vehicle {
+	var out []Vehicle
+	for _, vin := range strings.Split(list, ",") {
+		vin = strings.TrimSpace(vin)
+		if vin == "" {
+			continue
+		}
+		veh := Vehicle{VIN: vin}
+		if dir != "" {
+			veh.Template = strings.TrimRight(dir, "/") + "/" + vin + ".json"
+		}
+		out = append(out, veh)
+	}
+	return out
+}
+
+// validate checks for fatal misconfiguration. It does NOT mutate cfg — derivation of
+// runtime fields happens in resolve(), so a config loaded for editing/persisting stays
+// exactly as the user wrote it.
 func (c *Config) validate() error {
 	if c.Ingest.ZMQAddr == "" {
 		return fmt.Errorf("ingest.zmq_addr is required")
@@ -310,15 +454,6 @@ func (c *Config) validate() error {
 	for i := range c.Vehicles {
 		if c.Vehicles[i].VIN == "" {
 			return fmt.Errorf("vehicles[%d].vin is required", i)
-		}
-		if c.Vehicles[i].ID == 0 {
-			c.Vehicles[i].ID = deriveID(c.Vehicles[i].VIN)
-		}
-		if c.Vehicles[i].VehicleID == 0 {
-			c.Vehicles[i].VehicleID = c.Vehicles[i].ID
-		}
-		if c.Vehicles[i].DisplayName == "" {
-			c.Vehicles[i].DisplayName = c.Vehicles[i].VIN
 		}
 	}
 	if c.HA.Enabled && c.HA.Broker == "" {
@@ -336,6 +471,25 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
+}
+
+// resolve derives runtime-only fields: stable per-vehicle ids and a display-name
+// fallback. It mutates cfg and is applied only to the runtime config (Load), never to
+// what Save persists — so the VIN is not baked into config.yaml as a display name.
+// (Slug() turns an empty/VIN display name into an opaque hash; main() auto-names from
+// the Fleet API when DisplayName is still the VIN.)
+func (c *Config) resolve() {
+	for i := range c.Vehicles {
+		if c.Vehicles[i].ID == 0 {
+			c.Vehicles[i].ID = deriveID(c.Vehicles[i].VIN)
+		}
+		if c.Vehicles[i].VehicleID == 0 {
+			c.Vehicles[i].VehicleID = c.Vehicles[i].ID
+		}
+		if c.Vehicles[i].DisplayName == "" {
+			c.Vehicles[i].DisplayName = c.Vehicles[i].VIN
+		}
+	}
 }
 
 // deriveID produces a stable positive int64 id from a VIN (FNV-1a) so TeslaMate
