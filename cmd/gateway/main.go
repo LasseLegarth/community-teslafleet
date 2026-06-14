@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -57,19 +58,33 @@ func main() {
 	var sup *supervisor.Supervisor
 	if cfg.Stream.Embedded {
 		sup = supervisor.New(log)
+		// fleet-telemetry is mTLS-only and won't start without a cert. Use the
+		// configured cert (port-forward + Let's Encrypt) or generate a self-signed one
+		// (Cloudflare-Tunnel mode, where the tunnel provides the car-facing TLS).
+		cert, key := cfg.Stream.TLSCert, cfg.Stream.TLSKey
+		if cert == "" || key == "" {
+			dir := filepath.Dir(cfg.Stream.FleetTelemetryConfig)
+			cert = filepath.Join(dir, "certs", "self-signed-cert.pem")
+			key = filepath.Join(dir, "certs", "self-signed-key.pem")
+			if gen, err := streamcfg.EnsureSelfSigned(cert, key, ""); err != nil {
+				log.Error("could not generate self-signed TLS cert", "err", err)
+			} else if gen {
+				log.Info("generated self-signed TLS cert for fleet-telemetry (tunnel mode)", "cert", cert)
+			}
+		}
 		// Generate the fleet-telemetry server config from our config every boot, so
 		// port/namespace/TLS changes take effect and the binary always has a valid file.
 		srvCfg := streamcfg.Build(cfg.Ingest.Namespace, cfg.Stream.ZMQBind,
-			cfg.Stream.TLSCert, cfg.Stream.TLSKey, cfg.Stream.TelemetryPort)
+			cert, key, cfg.Stream.TelemetryPort)
 		if err := streamcfg.Write(cfg.Stream.FleetTelemetryConfig, srvCfg); err != nil {
 			log.Error("could not write fleet-telemetry config", "path", cfg.Stream.FleetTelemetryConfig, "err", err)
 		} else {
-			mode := "tunnel (plaintext)"
-			if srvCfg.TLS != nil {
-				mode = "own TLS (cert)"
+			certMode := "self-signed (tunnel)"
+			if cfg.Stream.TLSCert != "" && cfg.Stream.TLSKey != "" {
+				certMode = "provided cert (port-forward)"
 			}
 			log.Info("generated fleet-telemetry config",
-				"path", cfg.Stream.FleetTelemetryConfig, "port", cfg.Stream.TelemetryPort, "tls", mode)
+				"path", cfg.Stream.FleetTelemetryConfig, "port", cfg.Stream.TelemetryPort, "tls", certMode)
 		}
 		sup.Add(supervisor.Process{
 			Name: "fleet-telemetry",
