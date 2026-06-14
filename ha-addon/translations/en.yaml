@@ -43,11 +43,13 @@ configuration:
       that TeslaMate polls (never wakes the car). Leave OFF for a
       Home-Assistant-only setup.
   vins:
-    name: Vehicle VINs
+    name: Vehicle VINs (optional filter)
     description: >-
-      Comma-separated list of the VINs you want this gateway to handle, e.g.
-      5YJ3...086,7SAY...123. Leave empty to auto-accept every car that appears
-      on the stream. Find your VIN in the Tesla app under the car's details.
+      Leave EMPTY for normal use. The VIN is read automatically from the
+      telemetry stream (and the onboarding wizard fetches your cars from
+      Tesla), so you never need to type it. Only fill this in if you have
+      several Teslas on the same stream and want to publish just some of them —
+      a comma-separated allow-list, e.g. 5YJ3...086,7SAY...123.
   commands_enabled:
     name: Enable HA → car commands
     description: >-
