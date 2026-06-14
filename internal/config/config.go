@@ -467,9 +467,9 @@ func (c *Config) validate() error {
 	if c.Ingest.Namespace == "" {
 		return fmt.Errorf("ingest.namespace is required")
 	}
-	if len(c.Vehicles) == 0 {
-		return fmt.Errorf("at least one vehicle (vin) is required (config vehicles[] or TGW_VINS)")
-	}
+	// Zero vehicles is valid: with no configured VINs the gateway auto-discovers
+	// every car it sees on the telemetry stream. A non-empty vehicles[] acts as an
+	// explicit allow-list instead.
 	for i := range c.Vehicles {
 		if c.Vehicles[i].VIN == "" {
 			return fmt.Errorf("vehicles[%d].vin is required", i)
@@ -509,6 +509,14 @@ func (c *Config) resolve() {
 			c.Vehicles[i].DisplayName = c.Vehicles[i].VIN
 		}
 	}
+}
+
+// AutoVehicle builds a Vehicle for a VIN discovered on the stream (not in config),
+// with stable derived ids and no display name — Slug() then yields a VIN-free
+// "tesla_<hash>" id, and the HA publisher names the device "Tesla <model>".
+func AutoVehicle(vin string) Vehicle {
+	id := deriveID(vin)
+	return Vehicle{VIN: vin, ID: id, VehicleID: id}
 }
 
 // deriveID produces a stable positive int64 id from a VIN (FNV-1a) so TeslaMate

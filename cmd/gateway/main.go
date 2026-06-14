@@ -40,6 +40,9 @@ func main() {
 	log := newLogger(cfg.LogLevel)
 	log.Info("starting community-teslafleet",
 		"vehicles", len(cfg.Vehicles), "fleetapi", cfg.FleetAPI.Enabled, "ha", cfg.HA.Enabled)
+	if len(cfg.Vehicles) == 0 {
+		log.Info("no vehicles configured — auto-discovering every car seen on the stream")
+	}
 
 	vins := make([]string, 0, len(cfg.Vehicles))
 	for _, v := range cfg.Vehicles {

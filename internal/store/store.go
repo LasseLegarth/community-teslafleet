@@ -188,6 +188,12 @@ type Store struct {
 	mu       sync.RWMutex
 	vehicles map[string]*vehicle
 	now      func() time.Time
+
+	// allow restricts which VINs are accepted. When non-nil, only listed VINs are
+	// stored (an explicit allow-list from config). When nil (no VINs configured),
+	// every VIN seen on the stream is auto-registered — telemetry IS the source of
+	// truth for which cars exist.
+	allow map[string]bool
 }
 
 // New creates a Store pre-populated with the given VINs. Only pre-populated VINs
@@ -197,24 +203,46 @@ func New(vins ...string) *Store {
 	s := &Store{vehicles: map[string]*vehicle{}, now: time.Now}
 	for _, vin := range vins {
 		if vin != "" {
+			if s.allow == nil {
+				s.allow = map[string]bool{}
+			}
+			s.allow[vin] = true
 			s.vehicles[vin] = &vehicle{fields: map[string]FieldValue{}}
 		}
 	}
 	return s
 }
 
-// get returns the pre-populated vehicle for vin, or nil if vin is not configured.
-func (s *Store) get(vin string) *vehicle {
+// getOrCreate returns the vehicle for vin, creating it on first sight when no
+// allow-list is configured (auto-discovery). Returns nil for an empty vin or a
+// vin excluded by the allow-list.
+func (s *Store) getOrCreate(vin string) *vehicle {
+	if vin == "" {
+		return nil
+	}
 	s.mu.RLock()
 	v := s.vehicles[vin]
 	s.mu.RUnlock()
+	if v != nil {
+		return v
+	}
+	if s.allow != nil && !s.allow[vin] {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v = s.vehicles[vin]; v != nil { // re-check after upgrading the lock
+		return v
+	}
+	v = &vehicle{fields: map[string]FieldValue{}}
+	s.vehicles[vin] = v
 	return v
 }
 
-// SetField records the latest value of a telemetry field for a vehicle. VINs not
-// pre-populated at startup are ignored.
+// SetField records the latest value of a telemetry field for a vehicle. The
+// vehicle is auto-registered on first sight unless excluded by the allow-list.
 func (s *Store) SetField(vin, field string, value any) {
-	v := s.get(vin)
+	v := s.getOrCreate(vin)
 	if v == nil {
 		return
 	}
@@ -226,9 +254,9 @@ func (s *Store) SetField(vin, field string, value any) {
 }
 
 // SetConnectivity records the latest connectivity status (online/offline/reconnect).
-// VINs not pre-populated at startup are ignored.
+// The vehicle is auto-registered on first sight unless excluded by the allow-list.
 func (s *Store) SetConnectivity(vin, status string) {
-	v := s.get(vin)
+	v := s.getOrCreate(vin)
 	if v == nil {
 		return
 	}

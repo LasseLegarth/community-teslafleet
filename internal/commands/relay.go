@@ -177,7 +177,9 @@ func NewRelay(cfg config.Commands, knownVINs []string, st locator, log *slog.Log
 
 // Handle maps an HA command (key + payload) to a Tesla command and sends it.
 func (r *Relay) Handle(vin, key, payload string) {
-	if !r.knownVINs[vin] {
+	// An empty knownVINs set means zero-config auto-discovery: accept any VIN. A
+	// non-empty set acts as an explicit allow-list.
+	if len(r.knownVINs) > 0 && !r.knownVINs[vin] {
 		r.log.Warn("rejecting command for unknown VIN", "vin", vin, "key", key)
 		return
 	}

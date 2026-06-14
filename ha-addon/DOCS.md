@@ -26,7 +26,7 @@ the add-on options directly. Configure everything in the **Configuration** tab.
 | `device_identifier` | `name` (slug → VIN out of entity_ids) or `vin` |
 | `telemetry_profile` | `eco` / `balanced` / `live` / `custom` — how often signals are fetched |
 | `fleetapi_enabled` | `true` only if you also run TeslaMate |
-| `vins` | comma-separated VIN list |
+| `vins` | **optional** — leave empty to auto-discover every car on the stream; set a comma-separated list only to filter to specific VINs |
 | `commands_enabled` | enable HA → car commands (needs a token via onboarding) |
 | `log_level` | debug / info / warn / error |
 

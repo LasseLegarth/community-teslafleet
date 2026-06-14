@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
@@ -31,6 +32,12 @@ type Publisher struct {
 	// Only touched from the single publishState goroutine, so no lock is needed.
 	discovered map[string]map[string]bool
 
+	// announced tracks which VINs have had their device-level discovery (curated +
+	// command entities) published. Touched from both the publishState loop and the
+	// MQTT on-connect callback, so it is guarded by annMu.
+	announced map[string]bool
+	annMu     sync.Mutex
+
 	// covered is the set of telemetry field names represented by a curated entity;
 	// generic per-field discovery skips them. Computed once.
 	covered map[string]bool
@@ -50,6 +57,7 @@ func NewPublisher(cfg *config.Config, st *store.Store, relay *commands.Relay, lo
 		interval:   interval,
 		stop:       make(chan struct{}),
 		discovered: map[string]map[string]bool{},
+		announced:  map[string]bool{},
 		covered:    coveredFields(),
 	}
 }
@@ -63,11 +71,16 @@ func (p *Publisher) Start() error {
 		SetConnectRetry(true).
 		SetConnectRetryInterval(5 * time.Second).
 		SetOnConnectHandler(func(c paho.Client) {
-			if err := p.publishDiscovery(); err != nil {
-				p.log.Error("ha discovery publish failed", "broker", p.cfg.HA.Broker, "err", err)
-			} else {
-				p.log.Info("ha discovery published", "broker", p.cfg.HA.Broker)
+			// Re-announce on every (re)connect so retained discovery survives a broker
+			// restart. Clearing announced makes ensureAnnounced re-publish for all
+			// currently-known vehicles (configured + already auto-discovered).
+			p.annMu.Lock()
+			p.announced = map[string]bool{}
+			p.annMu.Unlock()
+			for _, v := range p.effectiveVehicles() {
+				p.ensureAnnounced(v)
 			}
+			p.log.Info("ha discovery published", "broker", p.cfg.HA.Broker)
 			if p.relay != nil {
 				topic := p.cfg.HA.StateTopicBase + "/+/cmd/+/set"
 				if tok := c.Subscribe(topic, 1, p.handleCommand); tok.Wait() && tok.Error() != nil {
@@ -107,6 +120,44 @@ func (p *Publisher) loop() {
 	}
 }
 
+// effectiveVehicles returns the configured vehicles plus an auto-built Vehicle for
+// every VIN seen on the stream that is not in config — so a zero-config gateway
+// publishes whatever cars appear. Configured entries win (keep display_name/template).
+func (p *Publisher) effectiveVehicles() []config.Vehicle {
+	out := make([]config.Vehicle, 0, len(p.cfg.Vehicles))
+	inCfg := make(map[string]bool, len(p.cfg.Vehicles))
+	for _, v := range p.cfg.Vehicles {
+		out = append(out, v)
+		inCfg[v.VIN] = true
+	}
+	for _, vin := range p.store.VINs() {
+		if !inCfg[vin] {
+			out = append(out, config.AutoVehicle(vin))
+		}
+	}
+	return out
+}
+
+// ensureAnnounced publishes a vehicle's device-level discovery (curated + command
+// entities) exactly once per (re)connect. Safe to call from both the on-connect
+// callback and the publishState loop.
+func (p *Publisher) ensureAnnounced(v config.Vehicle) {
+	p.annMu.Lock()
+	if p.announced[v.VIN] {
+		p.annMu.Unlock()
+		return
+	}
+	p.announced[v.VIN] = true
+	p.annMu.Unlock()
+	if err := p.publishVehicleDiscovery(v); err != nil {
+		p.log.Error("vehicle discovery publish failed", "vin", v.VIN, "err", err)
+		// Roll back so the next tick retries this vehicle.
+		p.annMu.Lock()
+		delete(p.announced, v.VIN)
+		p.annMu.Unlock()
+	}
+}
+
 // pubID is the public identifier for a vehicle per ha.device_identifier: the name
 // slug ("name", default — keeps the VIN out of entity_ids) or the VIN ("vin").
 func (p *Publisher) pubID(v config.Vehicle) string {
@@ -128,7 +179,7 @@ func (p *Publisher) uid(v config.Vehicle, key string) string {
 
 // vinForPubID maps a public identifier (from a command topic) back to its VIN.
 func (p *Publisher) vinForPubID(id string) (string, bool) {
-	for _, v := range p.cfg.Vehicles {
+	for _, v := range p.effectiveVehicles() {
 		if p.pubID(v) == id {
 			return v.VIN, true
 		}
@@ -176,9 +227,15 @@ func (p *Publisher) deviceInfo(v config.Vehicle) map[string]any {
 	// identifiers/topics use pubID (name slug by default), keeping the VIN out of
 	// entity_ids. The VIN is still surfaced as serial_number — a value visible in the
 	// device info, not in any entity_id.
+	// Friendly device name. For auto-discovered vehicles (no display_name, or it's
+	// just the VIN) fall back to "Tesla <model>" — never the raw VIN in the name.
+	name := v.DisplayName
+	if name == "" || name == v.VIN {
+		name = "Tesla " + modelFromVIN(v.VIN)
+	}
 	dev := map[string]any{
 		"identifiers":   []string{p.pubID(v)},
-		"name":          v.DisplayName,
+		"name":          name,
 		"manufacturer":  "Tesla",
 		"model":         modelFromVIN(v.VIN),
 		"serial_number": v.VIN,
@@ -197,7 +254,10 @@ func (p *Publisher) deviceInfo(v config.Vehicle) map[string]any {
 
 func (p *Publisher) publishState() {
 	now := p.store.Now()
-	for _, v := range p.cfg.Vehicles {
+	for _, v := range p.effectiveVehicles() {
+		// Announce device-level discovery for any vehicle that appeared on the stream
+		// after the last (re)connect, so a zero-config gateway lights up in HA.
+		p.ensureAnnounced(v)
 		snap, _ := p.store.Snapshot(v.VIN)
 		d := store.Derive(snap, p.cfg.State, now)
 		// Announce generic discovery for any newly-seen, uncovered field before
@@ -286,11 +346,12 @@ func (p *Publisher) genericDiscoveryConfig(v config.Vehicle, field string, val a
 	return "sensor", c
 }
 
-// publishDiscovery publishes the retained QoS1 discovery configs and waits on the
-// paho tokens so a failed publish surfaces as an error instead of silently
-// yielding missing HA entities. Discovery configs that fail to marshal are
-// skipped (an empty retained payload would DELETE the HA entity).
-func (p *Publisher) publishDiscovery() error {
+// publishVehicleDiscovery publishes one vehicle's retained QoS1 discovery configs
+// (curated entities + optional command entities) and waits on the paho tokens so a
+// failed publish surfaces as an error instead of silently yielding missing HA
+// entities. Discovery configs that fail to marshal are skipped (an empty retained
+// payload would DELETE the HA entity).
+func (p *Publisher) publishVehicleDiscovery(v config.Vehicle) error {
 	const pubTimeout = 10 * time.Second
 	publish := func(topic string, cfg map[string]any) error {
 		payload, err := json.Marshal(cfg)
@@ -314,20 +375,18 @@ func (p *Publisher) publishDiscovery() error {
 			firstErr = err
 		}
 	}
-	for _, v := range p.cfg.Vehicles {
-		dev := p.deviceInfo(v)
-		origin := map[string]any{"name": "community-teslafleet"}
-		for _, e := range p.entities {
-			cfg := p.discoveryConfig(v, e, dev, origin)
-			topic := fmt.Sprintf("%s/%s/%s/%s/config", p.cfg.HA.DiscoveryPrefix, e.Component, p.pubID(v), e.Key)
+	dev := p.deviceInfo(v)
+	origin := map[string]any{"name": "community-teslafleet"}
+	for _, e := range p.entities {
+		cfg := p.discoveryConfig(v, e, dev, origin)
+		topic := fmt.Sprintf("%s/%s/%s/%s/config", p.cfg.HA.DiscoveryPrefix, e.Component, p.pubID(v), e.Key)
+		note(publish(topic, cfg))
+	}
+	if p.relay != nil {
+		for _, ce := range commands.Entities(p.cfg.Commands) {
+			cfg := p.commandDiscoveryConfig(v, ce, dev, origin)
+			topic := fmt.Sprintf("%s/%s/%s/cmd_%s/config", p.cfg.HA.DiscoveryPrefix, ce.Component, p.pubID(v), ce.Key)
 			note(publish(topic, cfg))
-		}
-		if p.relay != nil {
-			for _, ce := range commands.Entities(p.cfg.Commands) {
-				cfg := p.commandDiscoveryConfig(v, ce, dev, origin)
-				topic := fmt.Sprintf("%s/%s/%s/cmd_%s/config", p.cfg.HA.DiscoveryPrefix, ce.Component, p.pubID(v), ce.Key)
-				note(publish(topic, cfg))
-			}
 		}
 	}
 	return firstErr

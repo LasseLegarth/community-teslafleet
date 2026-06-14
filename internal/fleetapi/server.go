@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -55,11 +56,30 @@ func (s *Server) Routes() chi.Router {
 }
 
 func (s *Server) handleProducts(w http.ResponseWriter, _ *http.Request) {
-	out := make([]map[string]any, 0, len(s.cfg.Vehicles))
-	for _, v := range s.cfg.Vehicles {
+	vehicles := s.effectiveVehicles()
+	out := make([]map[string]any, 0, len(vehicles))
+	for _, v := range vehicles {
 		out = append(out, s.summary(v))
 	}
 	writeResponse(w, out)
+}
+
+// effectiveVehicles returns the configured vehicles plus an auto-built Vehicle for
+// every VIN seen on the stream that is not in config, so a zero-config gateway also
+// serves TeslaMate the cars it has discovered.
+func (s *Server) effectiveVehicles() []config.Vehicle {
+	out := make([]config.Vehicle, 0, len(s.cfg.Vehicles))
+	inCfg := make(map[string]bool, len(s.cfg.Vehicles))
+	for _, v := range s.cfg.Vehicles {
+		out = append(out, v)
+		inCfg[v.VIN] = true
+	}
+	for _, vin := range s.store.VINs() {
+		if !inCfg[vin] {
+			out = append(out, config.AutoVehicle(vin))
+		}
+	}
+	return out
 }
 
 func (s *Server) handleVehicle(w http.ResponseWriter, r *http.Request) {
@@ -122,7 +142,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleDebug(w http.ResponseWriter, _ *http.Request) {
 	now := s.store.Now()
 	out := map[string]any{}
-	for _, v := range s.cfg.Vehicles {
+	for _, v := range s.effectiveVehicles() {
 		snap, seen := s.store.Snapshot(v.VIN)
 		d := store.Derive(snap, s.cfg.State, now)
 		fields := map[string]any{}
@@ -147,13 +167,17 @@ func (s *Server) handleDebug(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) summary(v config.Vehicle) map[string]any {
 	snap, _ := s.store.Snapshot(v.VIN)
 	d := store.Derive(snap, s.cfg.State, s.store.Now())
+	name := v.DisplayName
+	if name == "" || name == v.VIN {
+		name = "Tesla" // auto-discovered: TeslaMate shows a placeholder until renamed
+	}
 	return map[string]any{
 		"id":               v.ID,
 		"id_s":             v.IDString(),
 		"user_id":          v.ID,
 		"vehicle_id":       v.VehicleID,
 		"vin":              v.VIN,
-		"display_name":     v.DisplayName,
+		"display_name":     name,
 		"state":            d.State,
 		"in_service":       false,
 		"calendar_enabled": true,
@@ -165,8 +189,16 @@ func (s *Server) summary(v config.Vehicle) map[string]any {
 
 func (s *Server) lookup(r *http.Request) (config.Vehicle, bool) {
 	id := chi.URLParam(r, "id")
-	v, ok := s.byKey[id]
-	return v, ok
+	if v, ok := s.byKey[id]; ok { // configured vehicle (VIN, id, or vehicle_id)
+		return v, ok
+	}
+	// Fall back to auto-discovered vehicles keyed by VIN or derived id-string.
+	for _, v := range s.effectiveVehicles() {
+		if id == v.VIN || id == v.IDString() || id == strconv.FormatInt(v.VehicleID, 10) {
+			return v, true
+		}
+	}
+	return config.Vehicle{}, false
 }
 
 func writeResponse(w http.ResponseWriter, payload any) {
