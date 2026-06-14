@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/legarth/community-teslafleet/internal/enroll"
 )
 
 //go:embed templates/*.html
@@ -41,6 +44,8 @@ type State struct {
 	TokenSet    bool           `json:"token_set"`
 	Vehicles    []teslaVehicle `json:"vehicles,omitempty"`
 	LastProbe   *ProbeResult   `json:"last_probe,omitempty"`
+	Profile     string         `json:"profile"`
+	Port        int            `json:"port"`
 	Notice      string         `json:"-"` // transient one-shot message
 }
 
@@ -137,6 +142,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /register-partner", s.registerPartner)
 	mux.HandleFunc("POST /token", s.pasteToken)
 	mux.HandleFunc("POST /vehicles", s.listVehicles)
+	mux.HandleFunc("POST /enrollment", s.saveEnrollment)
 	mux.HandleFunc("POST /enroll", s.enroll)
 	return s.auth(mux)
 }
@@ -160,6 +166,8 @@ type view struct {
 	Base       string
 	State      State
 	PairingURL string
+	Profiles   []string
+	Estimate   enroll.Estimate
 }
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, notice string) {
@@ -167,10 +175,15 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, notice string) {
 	st := s.store.st
 	st.Notice = notice
 	s.store.mu.Unlock()
-	v := view{Base: r.Header.Get("X-Ingress-Path"), State: st}
+	v := view{Base: r.Header.Get("X-Ingress-Path"), State: st, Profiles: enroll.Profiles}
 	if st.Domain != "" {
 		v.PairingURL = pairingURL(st.Domain)
 	}
+	prof := st.Profile
+	if prof == "" {
+		prof = "balanced"
+	}
+	v.Estimate = enroll.EstimateCost(enroll.Generate(prof, st.Domain, st.Port))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "index.html", v); err != nil {
 		s.log.Error("render", "err", err)
@@ -298,6 +311,32 @@ func (s *Server) listVehicles(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.saveState()
 	s.store.mu.Unlock()
 	s.render(w, r, "✓ Found "+itoa(len(vs))+" vehicle(s). Pair each via the link below, then enroll.")
+}
+
+// saveEnrollment generates an ftc.json from the chosen profile + endpoint and writes it
+// to the gateway's enroll file (used by step 7 / the relay).
+func (s *Server) saveEnrollment(w http.ResponseWriter, r *http.Request) {
+	profile := strings.TrimSpace(r.FormValue("profile"))
+	port, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("port")))
+	s.store.mu.Lock()
+	domain := s.store.st.Domain
+	s.store.st.Profile = profile
+	s.store.st.Port = port
+	_ = s.store.saveState()
+	s.store.mu.Unlock()
+
+	ftc := enroll.Generate(profile, domain, port)
+	b, err := json.MarshalIndent(ftc, "", "  ")
+	if err != nil {
+		s.render(w, r, "✗ Could not build config: "+err.Error())
+		return
+	}
+	if err := atomicWrite(s.opts.EnrollFile, b, 0o600); err != nil {
+		s.render(w, r, "✗ Could not write "+s.opts.EnrollFile+": "+err.Error())
+		return
+	}
+	est := enroll.EstimateCost(ftc)
+	s.render(w, r, "✓ Saved enrollment ("+itoa(est.EnrolledFields)+" signals, profile "+profile+"). Now enroll below.")
 }
 
 func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {

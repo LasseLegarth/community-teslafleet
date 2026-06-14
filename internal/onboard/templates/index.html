@@ -108,6 +108,26 @@ site / phone (clearly marked).</p>
   {{if .State.Vehicles}}<ul>{{range .State.Vehicles}}<li><code>{{.VIN}}</code> — {{.DisplayName}}</li>{{end}}</ul>{{end}}
 </div>
 
+<div class="step {{if .State.Profile}}done{{end}}">
+  <h2>6b · Enrollment — how often signals are fetched
+    {{if .State.Profile}}<span class="badge ok">{{.State.Profile}}</span>{{else}}<span class="badge todo">todo</span>{{end}}
+  </h2>
+  <p class="muted">Pick how much/how often to stream. <strong>eco</strong> = cheapest,
+  <strong>balanced</strong> = good live data + low cost, <strong>live</strong> = most detailed.</p>
+  <form method="post" action="{{.Base}}/enrollment">
+    <label>Profile</label>
+    <select name="profile">
+      {{$cur := .State.Profile}}{{range .Profiles}}<option value="{{.}}" {{if eq . $cur}}selected{{end}}>{{.}}</option>{{end}}
+    </select>
+    <label>Telemetry port</label>
+    <input name="port" value="{{if .State.Port}}{{.State.Port}}{{else}}443{{end}}" placeholder="443">
+    <button type="submit">Generate &amp; save config</button>
+  </form>
+  <p class="muted">Estimate (current selection): ~{{.Estimate.SignalsLow}}–{{.Estimate.SignalsHigh}}
+  signals/month across {{.Estimate.EnrolledFields}} signals. Most setups stay within Tesla's
+  free monthly credit (≈ $0). Wakes &amp; commands are billed separately.</p>
+</div>
+
 <div class="step">
   <h2>7 · Enroll telemetry <span class="badge todo">last</span></h2>
   <p class="muted">Sends your fleet_telemetry_config (set intervals on the Enrollment page)
