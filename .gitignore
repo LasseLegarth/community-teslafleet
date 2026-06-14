@@ -5,6 +5,20 @@ config.*.yaml
 templates/*.json
 !templates/*.example.json
 
+# Secrets & runtime state — never commit
+.env
+/data/
+/certs/
+/proxy/
+*.pem
+*.key
+cf.ini
+client-secret
+refresh_token
+options.json
+fleet-telemetry-config.json
+!fleet-telemetry-config.example.json
+
 # Build artifacts
 /gateway
 /dist/
