@@ -1,0 +1,68 @@
+configuration:
+  zmq_addr:
+    name: Fleet-telemetry ZMQ address
+    description: >-
+      Where your self-hosted fleet-telemetry server publishes its raw stream
+      (brokerless ZMQ). Format tcp://HOST:PORT, e.g. tcp://192.168.1.50:5284.
+      HOST is the machine running fleet-telemetry; PORT is its zmq dispatcher
+      port (5284 by default). This is NOT an MQTT broker — leave it at the
+      default only if fleet-telemetry runs on the same host as this add-on.
+  namespace:
+    name: Telemetry namespace
+    description: >-
+      Must exactly match the "namespace" set in your fleet-telemetry server
+      config. It prefixes the stream topics. If you didn't change it on the
+      server, leave this as tesla_telemetry.
+  units_system:
+    name: Display units
+    description: >-
+      How values are shown in Home Assistant. metric = km, °C, bar.
+      imperial = mi, °F, psi. Purely cosmetic — pick what you read on the
+      dashboard. (The car always streams imperial internally; the gateway
+      converts.)
+  device_identifier:
+    name: Entity naming
+    description: >-
+      How HA entity IDs are built. name (recommended) = uses a slug from the
+      car's name, so the VIN never appears in entity IDs (better privacy):
+      e.g. sensor.tesla_serenity_battery. vin = uses the VIN in entity IDs.
+      The VIN is always stored as the device serial number either way.
+  telemetry_profile:
+    name: Streaming frequency
+    description: >-
+      How often the car sends each signal — a trade-off between freshness and
+      Tesla's billed signal count (you get ~$10/month free credit, enough for
+      most setups). eco = slowest, cheapest. balanced (recommended) = good
+      live feel within the free tier. live = near-real-time, more signals.
+      custom = use your own ftc.json from the onboarding wizard.
+  fleetapi_enabled:
+    name: Serve TeslaMate (Fleet API)
+    description: >-
+      Turn ON only if you also run TeslaMate and want it to log from this
+      gateway for free. It exposes a local Fleet API + WebSocket on port 4460
+      that TeslaMate polls (never wakes the car). Leave OFF for a
+      Home-Assistant-only setup.
+  vins:
+    name: Vehicle VINs
+    description: >-
+      Comma-separated list of the VINs you want this gateway to handle, e.g.
+      5YJ3...086,7SAY...123. Leave empty to auto-accept every car that appears
+      on the stream. Find your VIN in the Tesla app under the car's details.
+  commands_enabled:
+    name: Enable HA → car commands
+    description: >-
+      Turn ON to control the car FROM Home Assistant (charging, climate,
+      locks, frunk/trunk, etc.). Requires completing the onboarding wizard
+      (Tesla token + virtual-key pairing) first. Leave OFF for read-only /
+      data-only — safe default for a first test.
+  log_level:
+    name: Log verbosity
+    description: >-
+      How much detail in the add-on log. info (recommended) for normal use.
+      debug when troubleshooting (very chatty — shows each signal). warn /
+      error for quiet operation once everything works.
+network:
+  "4460/tcp": >-
+    Local Fleet API + WebSocket for TeslaMate. Only needed if "Serve TeslaMate"
+    is ON and TeslaMate runs on another host. LAN-only — never port-forward
+    this to the internet.
