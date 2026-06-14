@@ -96,6 +96,24 @@ All options are in [`config.example.yaml`](config.example.yaml) and mirrored as
 `TGW_*` environment variables (env wins). Minimum: `mqtt.broker`,
 `mqtt.topic_base`, one `vehicles[].vin`.
 
+## Onboarding wizard
+
+A guided wizard handles the hard Tesla partner setup. Enable it (`TGW_ONBOARD_ENABLED=true`,
+served on `:8099`; in the HA add-on it appears in the sidebar via ingress). It:
+generates the signing keypair, renders the `.well-known` public key and **verifies it's
+reachable**, registers the partner account, saves your refresh token, lists vehicles +
+shows the per-car pairing link, lets you pick a stream **profile** (eco/balanced/live)
+with a cost estimate, and enrolls telemetry. Standalone: set `TGW_ONBOARD_PASSWORD` (the
+UI holds keys/tokens — it binds with basic-auth; never expose it unauthenticated).
+
+## Backup & restore
+
+Everything stateful lives in **`/data`**: `config.yaml`, the rotating refresh token,
+`ftc.json`, and `onboard/` (keys + progress). Back up that one directory.
+- **HA add-on**: `/data` is included in Home Assistant's add-on backups automatically.
+- **Standalone**: back up the `./data` volume (e.g. `tar czf data-backup.tgz ./data`).
+Restore = drop the directory back and restart.
+
 ## Status
 
 Working: Fleet API + WSS emulation (TeslaMate), Home Assistant discovery for all
