@@ -8,8 +8,8 @@ name: Community TeslaFleet
 version: "0.1.1"
 slug: community_teslafleet
 description: Self-hosted Tesla Fleet Telemetry → Home Assistant (+ optional TeslaMate Fleet API)
-url: https://github.com/legarth/community-teslafleet
-image: ghcr.io/legarth/community-teslafleet   # single multi-arch manifest (no {arch})
+url: https://github.com/LasseLegarth/community-teslafleet
+image: ghcr.io/lasselegarth/community-teslafleet   # single multi-arch manifest (no {arch})
 arch:
   - aarch64
   - amd64
