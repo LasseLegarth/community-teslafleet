@@ -75,6 +75,10 @@ type Onboard struct {
 	Listen   string `yaml:"listen"`   // e.g. :8099
 	Password string `yaml:"password"` // optional basic-auth for standalone
 	DataDir  string `yaml:"data_dir"` // where keys/state live; default /data/onboard
+	// WellKnownListen serves the partner public key (unauthenticated) at
+	// /.well-known/appspecific/com.tesla.3p.public-key.pem so the user can route their
+	// domain here instead of hosting the file by hand. Tesla fetches it over HTTPS.
+	WellKnownListen string `yaml:"well_known_listen"` // e.g. :8098
 }
 
 // Recording appends every telemetry field update to a JSONL file for debugging
@@ -262,7 +266,7 @@ func Defaults() Config {
 		},
 		Units:     Units{System: "metric", RangeInput: "mi", SpeedInput: "mph", OdometerInput: "mi"},
 		Recording: Recording{Path: "/data/telemetry.jsonl", MaxMB: 100},
-		Onboard:   Onboard{Listen: ":8099", DataDir: "/data/onboard"},
+		Onboard:   Onboard{Listen: ":8099", DataDir: "/data/onboard", WellKnownListen: ":8098"},
 		Stream: Stream{
 			FleetTelemetryBin:    "/usr/local/bin/fleet-telemetry",
 			FleetTelemetryConfig: "/data/fleet-telemetry/config.json",
@@ -476,6 +480,7 @@ func applyEnv(c *Config) {
 	setStr(&c.Onboard.Listen, "TGW_ONBOARD_LISTEN")
 	setStr(&c.Onboard.Password, "TGW_ONBOARD_PASSWORD")
 	setStr(&c.Onboard.DataDir, "TGW_ONBOARD_DATA_DIR")
+	setStr(&c.Onboard.WellKnownListen, "TGW_ONBOARD_WELLKNOWN_LISTEN")
 	setBool(&c.Stream.Embedded, "TGW_STREAM_EMBEDDED")
 	setStr(&c.Stream.FleetTelemetryBin, "TGW_STREAM_FLEET_TELEMETRY_BIN")
 	setStr(&c.Stream.FleetTelemetryConfig, "TGW_STREAM_FLEET_TELEMETRY_CONFIG")

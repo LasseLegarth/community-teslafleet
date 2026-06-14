@@ -24,9 +24,11 @@ ingress: true               # serve the onboarding wizard in the HA sidebar
 ingress_port: 8099
 ports:
   "4443/tcp": 4443          # fleet-telemetry mTLS — the car dials in (must be reachable from the internet)
+  "8098/tcp": 8098          # serves the partner public key at /.well-known/... (route your domain here)
   "4460/tcp": null          # Fleet API + WSS for TeslaMate (LAN-only; set a port only if using TeslaMate)
 ports_description:
   "4443/tcp": fleet-telemetry — the car connects here (port-forward this, or use a Cloudflare Tunnel)
+  "8098/tcp": Partner public key (.well-known) — route https://<your-domain>/.well-known/... here
   "4460/tcp": Fleet API + WSS for TeslaMate (LAN-only; leave unset if not using TeslaMate)
 # State (keys, config, ftc.json, certs) lives in the add-on's own persistent /data
 # volume — automatically writable and included in HA backups; no map entry needed.

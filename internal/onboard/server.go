@@ -147,6 +147,23 @@ func (s *Server) Handler() http.Handler {
 	return s.auth(mux)
 }
 
+// WellKnownHandler serves the partner public key, UNAUTHENTICATED, so the user can
+// point their domain's /.well-known here instead of hosting the file by hand (Tesla
+// fetches it over HTTPS with no credentials). 404 until the key is generated.
+func (s *Server) WellKnownHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+WellKnownPath, func(w http.ResponseWriter, _ *http.Request) {
+		pub, err := s.store.publicPEM()
+		if err != nil {
+			http.Error(w, "public key not generated yet", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-pem-file")
+		w.Write(pub)
+	})
+	return mux
+}
+
 func (s *Server) auth(next http.Handler) http.Handler {
 	if s.opts.Password == "" {
 		return next

@@ -177,6 +177,17 @@ func main() {
 					log.Error("onboard server error", "err", err)
 				}
 			}()
+			// Unauthenticated public endpoint serving the partner public key, so the
+			// user can route their domain's /.well-known here (Tesla fetches it).
+			if cfg.Onboard.WellKnownListen != "" {
+				wksrv := &http.Server{Addr: cfg.Onboard.WellKnownListen, Handler: ob.WellKnownHandler(), ReadHeaderTimeout: 10 * time.Second}
+				go func() {
+					log.Info("well-known public-key endpoint listening", "addr", cfg.Onboard.WellKnownListen, "path", onboard.WellKnownPath)
+					if err := wksrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+						log.Error("well-known server error", "err", err)
+					}
+				}()
+			}
 		}
 	}
 

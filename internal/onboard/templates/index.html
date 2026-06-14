@@ -57,12 +57,15 @@ site / phone (clearly marked).</p>
 
 {{if .State.HasKeys}}
 <div class="step {{if and .State.LastProbe .State.LastProbe.OK}}done{{end}}">
-  <h2>3 · Host the public key &amp; verify
+  <h2>3 · Publish the public key &amp; verify
     {{if and .State.LastProbe .State.LastProbe.OK}}<span class="badge ok">verified</span>{{else}}<span class="badge todo">todo</span>{{end}}
   </h2>
-  <p>Host the downloaded file (any HTTPS host on your domain — Cloudflare/GitHub Pages
-  is fine) at exactly:</p>
+  <p>Tesla must fetch your public key over HTTPS at exactly:</p>
   <pre>https://{{if .State.Domain}}{{.State.Domain}}{{else}}&lt;domain&gt;{{end}}/.well-known/appspecific/com.tesla.3p.public-key.pem</pre>
+  <p><strong>This add-on already serves that file</strong> on port <code>8098</code> — just
+  route your domain's <code>/.well-known/</code> path to it (Cloudflare Tunnel, or your
+  reverse proxy). No need to host it by hand. Prefer to host it elsewhere? Download it
+  and put it on any HTTPS host on your domain.</p>
   <p>
     <a href="{{.Base}}/public-key.pem"><button class="sec" type="button">Download public-key.pem</button></a>
     <form method="post" action="{{.Base}}/probe"><button type="submit">Verify it's reachable</button></form>
