@@ -60,6 +60,11 @@ type Stream struct {
 	// ZMQAddr the embedded fleet-telemetry dispatcher binds; the gateway SUB-connects
 	// to the same address on localhost.
 	ZMQBind string `yaml:"zmq_bind"`
+	// TLSCert/TLSKey: when both are set, the embedded fleet-telemetry terminates TLS
+	// itself (port-forward + Let's Encrypt). Leave empty for Cloudflare-Tunnel mode,
+	// where the tunnel provides public TLS and fleet-telemetry runs plaintext behind it.
+	TLSCert string `yaml:"tls_cert"`
+	TLSKey  string `yaml:"tls_key"`
 }
 
 // Onboard is the guided Tesla onboarding wizard (separate HTTP listener — keys/token
@@ -477,6 +482,8 @@ func applyEnv(c *Config) {
 	setStr(&c.Stream.ProxyBin, "TGW_STREAM_PROXY_BIN")
 	setInt(&c.Stream.TelemetryPort, "TGW_STREAM_TELEMETRY_PORT")
 	setStr(&c.Stream.ZMQBind, "TGW_STREAM_ZMQ_BIND")
+	setStr(&c.Stream.TLSCert, "TGW_STREAM_TLS_CERT")
+	setStr(&c.Stream.TLSKey, "TGW_STREAM_TLS_KEY")
 	setStr(&c.LogLevel, "TGW_LOG_LEVEL")
 
 	if len(c.Vehicles) == 0 {

@@ -22,6 +22,7 @@ import (
 	"github.com/LasseLegarth/community-teslafleet/internal/onboard"
 	"github.com/LasseLegarth/community-teslafleet/internal/recorder"
 	"github.com/LasseLegarth/community-teslafleet/internal/store"
+	"github.com/LasseLegarth/community-teslafleet/internal/streamcfg"
 	"github.com/LasseLegarth/community-teslafleet/internal/supervisor"
 	"github.com/LasseLegarth/community-teslafleet/internal/vehicledata"
 	"github.com/LasseLegarth/community-teslafleet/internal/wss"
@@ -56,9 +57,19 @@ func main() {
 	var sup *supervisor.Supervisor
 	if cfg.Stream.Embedded {
 		sup = supervisor.New(log)
-		if _, err := os.Stat(cfg.Stream.FleetTelemetryConfig); err != nil {
-			log.Warn("fleet-telemetry config not found yet — run the onboarding wizard to generate it",
-				"path", cfg.Stream.FleetTelemetryConfig)
+		// Generate the fleet-telemetry server config from our config every boot, so
+		// port/namespace/TLS changes take effect and the binary always has a valid file.
+		srvCfg := streamcfg.Build(cfg.Ingest.Namespace, cfg.Stream.ZMQBind,
+			cfg.Stream.TLSCert, cfg.Stream.TLSKey, cfg.Stream.TelemetryPort)
+		if err := streamcfg.Write(cfg.Stream.FleetTelemetryConfig, srvCfg); err != nil {
+			log.Error("could not write fleet-telemetry config", "path", cfg.Stream.FleetTelemetryConfig, "err", err)
+		} else {
+			mode := "tunnel (plaintext)"
+			if srvCfg.TLS != nil {
+				mode = "own TLS (cert)"
+			}
+			log.Info("generated fleet-telemetry config",
+				"path", cfg.Stream.FleetTelemetryConfig, "port", cfg.Stream.TelemetryPort, "tls", mode)
 		}
 		sup.Add(supervisor.Process{
 			Name: "fleet-telemetry",
