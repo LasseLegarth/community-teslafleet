@@ -16,16 +16,34 @@ import (
 //go:embed templates/*.html
 var templatesFS embed.FS
 
-// State is the persisted onboarding progress (no secrets — the private key lives in a
-// separate file with 0600 perms).
-type State struct {
-	Domain    string       `json:"domain"`
-	ClientID  string       `json:"client_id"`
-	HasKeys   bool         `json:"has_keys"`
-	LastProbe *ProbeResult `json:"last_probe,omitempty"`
+// Options configures the wizard server. The Tesla* fields come from the gateway config;
+// the wizard fills in domain/client creds/token as the user progresses.
+type Options struct {
+	DataDir    string
+	Password   string // optional basic-auth (standalone); HA ingress is pre-authenticated
+	AuthHost   string
+	AuthPath   string
+	FleetAPI   string // regional Fleet API base (required for partner/vehicle/enroll calls)
+	ClientID   string // optional default from config (wizard can override)
+	ProxyURL   string // vehicle-command proxy (for enroll)
+	EnrollFile string // ftc.json path to POST on enroll
+	TokenCache string // where to persist the obtained refresh token (relay reads this)
 }
 
-// Store persists keys + state under DataDir.
+// State is the persisted onboarding progress (no secrets in here; the private key and
+// client secret live in separate 0600 files).
+type State struct {
+	Domain      string         `json:"domain"`
+	ClientID    string         `json:"client_id"`
+	HasKeys     bool           `json:"has_keys"`
+	SecretSet   bool           `json:"secret_set"`
+	PartnerDone bool           `json:"partner_done"`
+	TokenSet    bool           `json:"token_set"`
+	Vehicles    []teslaVehicle `json:"vehicles,omitempty"`
+	LastProbe   *ProbeResult   `json:"last_probe,omitempty"`
+	Notice      string         `json:"-"` // transient one-shot message
+}
+
 type Store struct {
 	dir string
 	mu  sync.Mutex
@@ -46,14 +64,11 @@ func newStore(dir string) (*Store, error) {
 func (s *Store) statePath() string   { return filepath.Join(s.dir, "state.json") }
 func (s *Store) privatePath() string { return filepath.Join(s.dir, "private-key.pem") }
 func (s *Store) publicPath() string  { return filepath.Join(s.dir, "public-key.pem") }
+func (s *Store) secretPath() string  { return filepath.Join(s.dir, "client-secret") }
 
 func (s *Store) saveState() error {
 	b, _ := json.MarshalIndent(s.st, "", "  ")
-	tmp := s.statePath() + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.statePath())
+	return atomicWrite(s.statePath(), b, 0o600)
 }
 
 func (s *Store) generateKeys() error {
@@ -61,40 +76,57 @@ func (s *Store) generateKeys() error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(s.privatePath(), kp.PrivatePEM, 0o600); err != nil {
+	if err := atomicWrite(s.privatePath(), kp.PrivatePEM, 0o600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(s.publicPath(), kp.PublicPEM, 0o644); err != nil {
+	if err := atomicWrite(s.publicPath(), kp.PublicPEM, 0o644); err != nil {
 		return err
 	}
 	s.st.HasKeys = true
 	return s.saveState()
 }
 
-func (s *Store) publicPEM() ([]byte, error) { return os.ReadFile(s.publicPath()) }
+func (s *Store) publicPEM() ([]byte, error)   { return os.ReadFile(s.publicPath()) }
+func (s *Store) clientSecret() string         { b, _ := os.ReadFile(s.secretPath()); return string(b) }
+func (s *Store) saveSecret(v string) error    { return atomicWrite(s.secretPath(), []byte(v), 0o600) }
 
-// Server is the onboarding wizard's HTTP handler set.
+func atomicWrite(path string, b []byte, mode os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// Server is the onboarding wizard.
 type Server struct {
 	store *Store
-	pass  string
+	opts  Options
 	log   *slog.Logger
 	tmpl  *template.Template
 }
 
-// NewServer builds the wizard server, loading/initialising state under dataDir.
-func NewServer(dataDir, password string, log *slog.Logger) (*Server, error) {
-	store, err := newStore(dataDir)
+func NewServer(opts Options, log *slog.Logger) (*Server, error) {
+	store, err := newStore(opts.DataDir)
 	if err != nil {
 		return nil, err
 	}
-	tmpl, err := template.ParseFS(templatesFS, "templates/*.html")
+	if store.st.ClientID == "" {
+		store.st.ClientID = opts.ClientID
+	}
+	tmpl, err := template.New("").Funcs(template.FuncMap{"hasPrefix": strings.HasPrefix}).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		return nil, err
 	}
-	return &Server{store: store, pass: password, log: log, tmpl: tmpl}, nil
+	return &Server{store: store, opts: opts, log: log, tmpl: tmpl}, nil
 }
 
-// Handler returns the wizard's HTTP handler (mount on its own listener or HA ingress).
+// client builds a Tesla API client from config + the wizard's stored creds.
+func (s *Server) client() *teslaClient {
+	return newTeslaClient(s.opts.AuthHost, s.opts.AuthPath, s.opts.FleetAPI,
+		s.store.st.ClientID, s.store.clientSecret())
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.page)
@@ -102,17 +134,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /generate", s.generate)
 	mux.HandleFunc("GET /public-key.pem", s.downloadPublic)
 	mux.HandleFunc("POST /probe", s.probe)
+	mux.HandleFunc("POST /register-partner", s.registerPartner)
+	mux.HandleFunc("POST /token", s.pasteToken)
+	mux.HandleFunc("POST /vehicles", s.listVehicles)
+	mux.HandleFunc("POST /enroll", s.enroll)
 	return s.auth(mux)
 }
 
-// auth applies optional basic-auth (standalone). HA ingress is already authenticated.
 func (s *Server) auth(next http.Handler) http.Handler {
-	if s.pass == "" {
+	if s.opts.Password == "" {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, pw, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(pw), []byte(s.pass)) != 1 {
+		if !ok || subtle.ConstantTimeCompare([]byte(pw), []byte(s.opts.Password)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="community-teslafleet"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -121,28 +156,29 @@ func (s *Server) auth(next http.Handler) http.Handler {
 	})
 }
 
-// view is the template data; base is the ingress base path (X-Ingress-Path) so all
-// links/forms work under HA ingress.
 type view struct {
-	Base  string
-	State State
+	Base       string
+	State      State
+	PairingURL string
 }
 
-func (s *Server) render(w http.ResponseWriter, r *http.Request, name string) {
+func (s *Server) render(w http.ResponseWriter, r *http.Request, notice string) {
 	s.store.mu.Lock()
 	st := s.store.st
+	st.Notice = notice
 	s.store.mu.Unlock()
 	v := view{Base: r.Header.Get("X-Ingress-Path"), State: st}
+	if st.Domain != "" {
+		v.PairingURL = pairingURL(st.Domain)
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.tmpl.ExecuteTemplate(w, name, v); err != nil {
-		s.log.Error("render", "tmpl", name, "err", err)
+	if err := s.tmpl.ExecuteTemplate(w, "index.html", v); err != nil {
+		s.log.Error("render", "err", err)
 	}
 }
 
-func (s *Server) page(w http.ResponseWriter, r *http.Request) { s.render(w, r, "index.html") }
+func (s *Server) page(w http.ResponseWriter, r *http.Request) { s.render(w, r, "") }
 
-// home redirects back to the wizard root (PRG: avoids re-POST on refresh). Respects the
-// HA ingress base path.
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, r.Header.Get("X-Ingress-Path")+"/", http.StatusSeeOther)
 }
@@ -151,6 +187,11 @@ func (s *Server) saveDomain(w http.ResponseWriter, r *http.Request) {
 	s.store.mu.Lock()
 	s.store.st.Domain = strings.TrimSpace(r.FormValue("domain"))
 	s.store.st.ClientID = strings.TrimSpace(r.FormValue("client_id"))
+	if sec := strings.TrimSpace(r.FormValue("client_secret")); sec != "" {
+		if err := s.store.saveSecret(sec); err == nil {
+			s.store.st.SecretSet = true
+		}
+	}
 	_ = s.store.saveState()
 	s.store.mu.Unlock()
 	s.home(w, r)
@@ -193,4 +234,99 @@ func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.saveState()
 	s.store.mu.Unlock()
 	s.home(w, r)
+}
+
+func (s *Server) registerPartner(w http.ResponseWriter, r *http.Request) {
+	s.store.mu.Lock()
+	domain, clientID := s.store.st.Domain, s.store.st.ClientID
+	s.store.mu.Unlock()
+	if domain == "" || clientID == "" || s.store.clientSecret() == "" || s.opts.FleetAPI == "" {
+		s.render(w, r, "✗ Need domain, client_id, client_secret and a Fleet API URL first.")
+		return
+	}
+	if err := s.client().registerPartner(domain); err != nil {
+		s.render(w, r, "✗ Partner registration failed: "+err.Error())
+		return
+	}
+	s.store.mu.Lock()
+	s.store.st.PartnerDone = true
+	_ = s.store.saveState()
+	s.store.mu.Unlock()
+	s.render(w, r, "✓ Partner account registered for "+domain)
+}
+
+func (s *Server) pasteToken(w http.ResponseWriter, r *http.Request) {
+	tok := strings.TrimSpace(r.FormValue("refresh_token"))
+	if tok == "" {
+		s.render(w, r, "✗ Paste a refresh token.")
+		return
+	}
+	if s.opts.TokenCache != "" {
+		if err := atomicWrite(s.opts.TokenCache, []byte(tok), 0o600); err != nil {
+			s.render(w, r, "✗ Could not write token cache: "+err.Error())
+			return
+		}
+	}
+	s.store.mu.Lock()
+	s.store.st.TokenSet = true
+	_ = s.store.saveState()
+	s.store.mu.Unlock()
+	s.render(w, r, "✓ Refresh token saved. Restart the gateway to use it for commands.")
+}
+
+func (s *Server) listVehicles(w http.ResponseWriter, r *http.Request) {
+	tok := strings.TrimSpace(r.FormValue("access_token"))
+	if tok == "" {
+		// Try to mint an access token from the saved refresh token.
+		if rt := s.readTokenCache(); rt != "" {
+			if at, err := s.client().refresh(rt); err == nil {
+				tok = at
+			}
+		}
+	}
+	if tok == "" {
+		s.render(w, r, "✗ Provide an access token, or save a refresh token first.")
+		return
+	}
+	vs, err := s.client().vehicles(tok)
+	if err != nil {
+		s.render(w, r, "✗ List vehicles failed: "+err.Error())
+		return
+	}
+	s.store.mu.Lock()
+	s.store.st.Vehicles = vs
+	_ = s.store.saveState()
+	s.store.mu.Unlock()
+	s.render(w, r, "✓ Found "+itoa(len(vs))+" vehicle(s). Pair each via the link below, then enroll.")
+}
+
+func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
+	payload, err := os.ReadFile(s.opts.EnrollFile)
+	if err != nil {
+		s.render(w, r, "✗ No enrollment file at "+s.opts.EnrollFile+" — set intervals on the Enrollment page first.")
+		return
+	}
+	rt := s.readTokenCache()
+	if rt == "" {
+		s.render(w, r, "✗ Save a refresh token first.")
+		return
+	}
+	at, err := s.client().refresh(rt)
+	if err != nil {
+		s.render(w, r, "✗ Token refresh failed: "+err.Error())
+		return
+	}
+	if err := postEnroll(s.opts.ProxyURL, at, payload); err != nil {
+		s.render(w, r, "✗ Enroll failed: "+err.Error())
+		return
+	}
+	s.render(w, r, "✓ Telemetry config sent. The car adopts it within a minute (poll synced).")
+}
+
+func (s *Server) readTokenCache() string {
+	if s.opts.TokenCache == "" {
+		return ""
+	}
+	b, _ := os.ReadFile(s.opts.TokenCache)
+	return strings.TrimSpace(string(b))
 }

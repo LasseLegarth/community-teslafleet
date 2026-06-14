@@ -99,7 +99,18 @@ func main() {
 
 	// Onboarding wizard (optional) — its own listener, off the auth-less Fleet API port.
 	if cfg.Onboard.Enabled {
-		if ob, err := onboard.NewServer(cfg.Onboard.DataDir, cfg.Onboard.Password, log); err != nil {
+		obOpts := onboard.Options{
+			DataDir:    cfg.Onboard.DataDir,
+			Password:   cfg.Onboard.Password,
+			AuthHost:   cfg.Commands.AuthHost,
+			AuthPath:   cfg.Commands.AuthPath,
+			FleetAPI:   cfg.Commands.FleetAPIURL,
+			ClientID:   cfg.Commands.ClientID,
+			ProxyURL:   cfg.Commands.ProxyURL,
+			EnrollFile: cfg.Commands.EnrollFile,
+			TokenCache: cfg.Commands.TokenCache,
+		}
+		if ob, err := onboard.NewServer(obOpts, log); err != nil {
 			log.Error("onboard init failed", "err", err)
 		} else {
 			osrv := &http.Server{Addr: cfg.Onboard.Listen, Handler: ob.Handler(), ReadHeaderTimeout: 10 * time.Second}

@@ -14,7 +14,7 @@ import (
 func newTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := NewServer(dir, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s, err := NewServer(Options{DataDir: dir}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestServer_GenerateThenDownload(t *testing.T) {
 
 func TestServer_BasicAuth(t *testing.T) {
 	dir := t.TempDir()
-	s, _ := NewServer(dir, "secret", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s, _ := NewServer(Options{DataDir: dir, Password: "secret"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h := s.Handler()
 
 	rr := httptest.NewRecorder()

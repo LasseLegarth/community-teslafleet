@@ -25,17 +25,21 @@
 endpoint. This wizard automates and verifies what it can; some steps you do on Tesla's
 site / phone (clearly marked).</p>
 
-<div class="step {{if .State.Domain}}done{{end}}">
+{{if .State.Notice}}<p class="{{if hasPrefix .State.Notice "✓"}}ok-msg{{else}}err-msg{{end}}"><strong>{{.State.Notice}}</strong></p>{{end}}
+
+<div class="step {{if .State.SecretSet}}done{{end}}">
   <h2>1 · Domain &amp; Tesla app
-    {{if .State.Domain}}<span class="badge ok">set</span>{{else}}<span class="badge todo">todo</span>{{end}}
+    {{if .State.SecretSet}}<span class="badge ok">set</span>{{else}}<span class="badge todo">todo</span>{{end}}
   </h2>
   <p class="muted">Create an app at <code>developer.tesla.com</code> and enter its domain
-  + client_id. (Redirect URI &amp; scopes are shown in the docs.)</p>
+  + client credentials. (Redirect URI &amp; scopes are in the docs.)</p>
   <form method="post" action="{{.Base}}/domain">
     <label>Public domain (optionally <code>host:port</code>)</label>
     <input name="domain" value="{{.State.Domain}}" placeholder="telemetry.example.com">
     <label>Client ID</label>
     <input name="client_id" value="{{.State.ClientID}}" placeholder="xxxxxxxx-....">
+    <label>Client Secret {{if .State.SecretSet}}<span class="muted">(stored — leave blank to keep)</span>{{end}}</label>
+    <input name="client_secret" type="password" placeholder="••••••••">
     <button type="submit">Save</button>
   </form>
 </div>
@@ -70,12 +74,45 @@ site / phone (clearly marked).</p>
 </div>
 {{end}}
 
+<div class="step {{if .State.PartnerDone}}done{{end}}">
+  <h2>4 · Register partner account
+    {{if .State.PartnerDone}}<span class="badge ok">done</span>{{else}}<span class="badge todo">todo</span>{{end}}
+  </h2>
+  <p class="muted">Registers your domain with Tesla (Tesla fetches the public key above).
+  Do this after step 3 is green.</p>
+  <form method="post" action="{{.Base}}/register-partner"><button type="submit">Register partner</button></form>
+</div>
+
+<div class="step {{if .State.TokenSet}}done{{end}}">
+  <h2>5 · Refresh token
+    {{if .State.TokenSet}}<span class="badge ok">saved</span>{{else}}<span class="badge todo">todo</span>{{end}}
+  </h2>
+  <p class="muted">Paste a cmd-scoped refresh token (generate via Tesla's auth-code flow
+  with scopes <code>offline_access vehicle_device_data vehicle_cmds
+  vehicle_charging_cmds</code>). The browser-based "Login with Tesla" flow needs a public
+  redirect URL matching your dev app — paste is the reliable path.</p>
+  <form method="post" action="{{.Base}}/token">
+    <input name="refresh_token" type="password" placeholder="EU_xxx…">
+    <button type="submit">Save token</button>
+  </form>
+</div>
+
 <div class="step">
-  <h2>4 · Register partner, token, pair cars, enroll <span class="badge todo">live</span></h2>
-  <p class="muted">These call Tesla with your credentials: register the partner account,
-  obtain the refresh token, generate a pairing link/QR per vehicle, and enroll telemetry
-  (poll until <code>synced</code>). Coming in the next build — they need live credentials
-  to verify end-to-end. For now, paste a refresh token via env/config to enable commands.</p>
+  <h2>6 · Pair virtual key per car
+    {{if .State.Vehicles}}<span class="badge ok">{{len .State.Vehicles}} car(s)</span>{{else}}<span class="badge todo">todo</span>{{end}}
+  </h2>
+  <p class="muted">List your cars, then <strong>open the pairing link on a phone</strong>
+  with the Tesla app to add the key to each car (you must do this per vehicle).</p>
+  <form method="post" action="{{.Base}}/vehicles"><button type="submit">List vehicles</button></form>
+  {{if .PairingURL}}<p>Pairing link (open on phone): <a href="{{.PairingURL}}">{{.PairingURL}}</a></p>{{end}}
+  {{if .State.Vehicles}}<ul>{{range .State.Vehicles}}<li><code>{{.VIN}}</code> — {{.DisplayName}}</li>{{end}}</ul>{{end}}
+</div>
+
+<div class="step">
+  <h2>7 · Enroll telemetry <span class="badge todo">last</span></h2>
+  <p class="muted">Sends your fleet_telemetry_config (set intervals on the Enrollment page)
+  to each paired car. The car adopts it within a minute.</p>
+  <form method="post" action="{{.Base}}/enroll"><button type="submit">Enroll telemetry</button></form>
 </div>
 
 <p class="muted">Not affiliated with Tesla, Inc.</p>
