@@ -7,7 +7,7 @@
 #
 # NOTE: `version` is overwritten by the release workflow to match the published image tag.
 name: Community TeslaFleet
-version: "0.1.6"
+version: "0.1.7"
 slug: community_teslafleet
 description: Self-hosted Tesla Fleet Telemetry → Home Assistant (+ optional TeslaMate Fleet API)
 url: https://github.com/LasseLegarth/community-teslafleet
