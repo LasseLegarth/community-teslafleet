@@ -55,6 +55,22 @@ publishing to Home Assistant's broker.
 - **Full** — also serves TeslaMate (`fleetapi.enabled: true`); point TeslaMate at
   `TESLA_API_HOST=http://<gateway-host>:4460`.
 
+## Requirements
+
+| | Why |
+|---|---|
+| **Home Assistant + MQTT** | the gateway publishes via MQTT discovery. The add-on auto-detects HA's broker; standalone points at any broker (e.g. Mosquitto). |
+| **A Tesla developer app** | free at [developer.tesla.com](https://developer.tesla.com) → `client_id` + `client_secret`. |
+| **A public domain with HTTPS** | Tesla fetches your partner public key at `https://<domain>/.well-known/...` and the car connects to a TLS telemetry hostname. |
+| **A publicly-reachable telemetry endpoint** | the car dials *in* — a public port (any port, not just 443), or a **Cloudflare Tunnel** if you can't open ports / are behind CGNAT. |
+| **Docker** (standalone) **or HA OS / Supervised** (add-on) | the standalone compose bundles `fleet-telemetry` + `vehicle-command-proxy`; the add-on requires HA OS/Supervised (not HA Container/Core). |
+| **A Fleet-Telemetry-capable Tesla** | most vehicles on recent firmware (≈2021+). One car or many. |
+| **TeslaMate** *(optional)* | only if you want the free local Fleet API for it. |
+
+> The domain + public reachability are Tesla's requirements, not this project's — they
+> can't be removed, only eased (the onboarding wizard + the connectivity options below).
+> No public infra? A hosted service like [Teslemetry](https://teslemetry.com) is simpler.
+
 ## Install
 
 ### Home Assistant add-on (recommended)
