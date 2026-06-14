@@ -1,12 +1,13 @@
 configuration:
-  zmq_addr:
-    name: Fleet-telemetry ZMQ address
+  telemetry_port:
+    name: Telemetry port (car connects here)
     description: >-
-      Where your self-hosted fleet-telemetry server publishes its raw stream
-      (brokerless ZMQ). Format tcp://HOST:PORT, e.g. tcp://192.168.1.50:5284.
-      HOST is the machine running fleet-telemetry; PORT is its zmq dispatcher
-      port (5284 by default). This is NOT an MQTT broker — leave it at the
-      default only if fleet-telemetry runs on the same host as this add-on.
+      The port the bundled fleet-telemetry server listens on for your car's
+      stream — the car dials IN to this port from the internet. You must make
+      it reachable: forward this port on your router to Home Assistant, OR use
+      a Cloudflare Tunnel. Default 4443. Pick another port only if 4443 is
+      taken or your ISP blocks it; the onboarding wizard tells the car which
+      port to use.
   namespace:
     name: Telemetry namespace
     description: >-

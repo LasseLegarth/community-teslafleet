@@ -21,6 +21,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Standalone slim gateway image (used by docker-compose with separate
+      # fleet-telemetry/proxy containers).
       - uses: docker/metadata-action@v5
         id: meta
         with:
@@ -31,10 +33,28 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      # Bundled HA add-on image (fleet-telemetry + vehicle-command proxy + gateway).
+      - uses: docker/metadata-action@v5
+        id: meta_addon
+        with:
+          images: ghcr.io/${{ github.repository }}-addon
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./ha-addon/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta_addon.outputs.tags }}
+          labels: ${{ steps.meta_addon.outputs.labels }}
 
   test:
     runs-on: ubuntu-latest
