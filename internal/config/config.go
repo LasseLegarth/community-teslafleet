@@ -36,7 +36,30 @@ type Config struct {
 	State         State     `yaml:"state"`
 	Recording     Recording `yaml:"recording"`
 	Onboard       Onboard   `yaml:"onboard"`
+	Stream        Stream    `yaml:"stream"`
 	LogLevel      string    `yaml:"log_level"`
+}
+
+// Stream runs the upstream Tesla components (fleet-telemetry, and the
+// vehicle-command proxy when commands are enabled) as child processes inside the
+// same container — the "all-in-one" mode the HA add-on uses so installing one
+// add-on yields the whole stack. Standalone setups leave Embedded=false and run
+// those as separate docker-compose services instead.
+type Stream struct {
+	Embedded bool `yaml:"embedded"`
+	// FleetTelemetryBin / FleetTelemetryConfig: the fleet-telemetry server binary and
+	// the generated server config (TLS, listen port, ZMQ dispatcher, namespace).
+	FleetTelemetryBin    string `yaml:"fleet_telemetry_bin"`
+	FleetTelemetryConfig string `yaml:"fleet_telemetry_config"`
+	// ProxyBin is the tesla vehicle-command HTTP proxy binary (started only when
+	// commands are enabled).
+	ProxyBin string `yaml:"proxy_bin"`
+	// TelemetryPort is the port fleet-telemetry listens on for the car's mTLS stream
+	// (the car dials in here). The public/forwarded port is advertised at enrollment.
+	TelemetryPort int `yaml:"telemetry_port"`
+	// ZMQAddr the embedded fleet-telemetry dispatcher binds; the gateway SUB-connects
+	// to the same address on localhost.
+	ZMQBind string `yaml:"zmq_bind"`
 }
 
 // Onboard is the guided Tesla onboarding wizard (separate HTTP listener — keys/token
@@ -61,9 +84,9 @@ type Recording struct {
 // via the vehicle-command proxy. Needs a cmd-scoped OAuth token the gateway refreshes.
 type Commands struct {
 	Enabled      bool   `yaml:"enabled"`
-	ProxyURL     string `yaml:"proxy_url"`  // vehicle-command proxy, e.g. https://vehicle-command-proxy:4443
-	AuthHost     string `yaml:"auth_host"`  // https://auth.tesla.com
-	AuthPath     string `yaml:"auth_path"`  // /oauth2/v3
+	ProxyURL     string `yaml:"proxy_url"` // vehicle-command proxy, e.g. https://vehicle-command-proxy:4443
+	AuthHost     string `yaml:"auth_host"` // https://auth.tesla.com
+	AuthPath     string `yaml:"auth_path"` // /oauth2/v3
 	ClientID     string `yaml:"client_id"`
 	ClientSecret string `yaml:"client_secret"`
 	RefreshToken string `yaml:"refresh_token"`
@@ -216,7 +239,7 @@ func Defaults() Config {
 		HTTP:          HTTP{Listen: ":4460"},
 		// Default profile is HA-only (see README). The Fleet API for TeslaMate is
 		// opt-in: set fleetapi_enabled (add-on) / TGW_FLEETAPI_ENABLED / fleetapi.enabled.
-		FleetAPI:      FleetAPI{Enabled: false},
+		FleetAPI: FleetAPI{Enabled: false},
 		HA: HA{
 			Enabled:                true,
 			ClientID:               "community-teslafleet",
@@ -235,6 +258,13 @@ func Defaults() Config {
 		Units:     Units{System: "metric", RangeInput: "mi", SpeedInput: "mph", OdometerInput: "mi"},
 		Recording: Recording{Path: "/data/telemetry.jsonl", MaxMB: 100},
 		Onboard:   Onboard{Listen: ":8099", DataDir: "/data/onboard"},
+		Stream: Stream{
+			FleetTelemetryBin:    "/usr/local/bin/fleet-telemetry",
+			FleetTelemetryConfig: "/data/fleet-telemetry/config.json",
+			ProxyBin:             "/usr/local/bin/tesla-http-proxy",
+			TelemetryPort:        4443,
+			ZMQBind:              "tcp://0.0.0.0:5284",
+		},
 		// OnlineGrace 300s keeps a parked-but-connected car "online" between sparse
 		// battery telemetry updates (Soc 60s / RatedRange 120s); it flips to asleep
 		// only after telemetry genuinely stops. Keeps TeslaMate's WSS stream open.
@@ -368,6 +398,8 @@ func applyOptions(c *Config) {
 	optStr(o, "mqtt_broker", &c.HA.Broker)
 	optStr(o, "mqtt_username", &c.HA.Username)
 	optStr(o, "mqtt_password", &c.HA.Password)
+	optBool(o, "embedded_stream", &c.Stream.Embedded)
+	optInt(o, "telemetry_port", &c.Stream.TelemetryPort)
 	optBool(o, "commands_enabled", &c.Commands.Enabled)
 	optStr(o, "tesla_client_id", &c.Commands.ClientID)
 	optStr(o, "tesla_client_secret", &c.Commands.ClientSecret)
@@ -387,6 +419,13 @@ func optStr(o map[string]any, key string, dst *string) {
 func optBool(o map[string]any, key string, dst *bool) {
 	if v, ok := o[key].(bool); ok {
 		*dst = v
+	}
+}
+
+func optInt(o map[string]any, key string, dst *int) {
+	// JSON numbers decode to float64.
+	if v, ok := o[key].(float64); ok {
+		*dst = int(v)
 	}
 }
 
@@ -432,6 +471,12 @@ func applyEnv(c *Config) {
 	setStr(&c.Onboard.Listen, "TGW_ONBOARD_LISTEN")
 	setStr(&c.Onboard.Password, "TGW_ONBOARD_PASSWORD")
 	setStr(&c.Onboard.DataDir, "TGW_ONBOARD_DATA_DIR")
+	setBool(&c.Stream.Embedded, "TGW_STREAM_EMBEDDED")
+	setStr(&c.Stream.FleetTelemetryBin, "TGW_STREAM_FLEET_TELEMETRY_BIN")
+	setStr(&c.Stream.FleetTelemetryConfig, "TGW_STREAM_FLEET_TELEMETRY_CONFIG")
+	setStr(&c.Stream.ProxyBin, "TGW_STREAM_PROXY_BIN")
+	setInt(&c.Stream.TelemetryPort, "TGW_STREAM_TELEMETRY_PORT")
+	setStr(&c.Stream.ZMQBind, "TGW_STREAM_ZMQ_BIND")
 	setStr(&c.LogLevel, "TGW_LOG_LEVEL")
 
 	if len(c.Vehicles) == 0 {

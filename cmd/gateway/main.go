@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/LasseLegarth/community-teslafleet/internal/onboard"
 	"github.com/LasseLegarth/community-teslafleet/internal/recorder"
 	"github.com/LasseLegarth/community-teslafleet/internal/store"
+	"github.com/LasseLegarth/community-teslafleet/internal/supervisor"
 	"github.com/LasseLegarth/community-teslafleet/internal/vehicledata"
 	"github.com/LasseLegarth/community-teslafleet/internal/wss"
 )
@@ -42,6 +44,32 @@ func main() {
 		"vehicles", len(cfg.Vehicles), "fleetapi", cfg.FleetAPI.Enabled, "ha", cfg.HA.Enabled)
 	if len(cfg.Vehicles) == 0 {
 		log.Info("no vehicles configured — auto-discovering every car seen on the stream")
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// All-in-one mode (HA add-on): run fleet-telemetry — and the vehicle-command
+	// proxy when commands are enabled — as supervised child processes, and ingest
+	// from the dispatcher they bind locally. Standalone leaves this off and runs
+	// those as separate docker-compose services.
+	var sup *supervisor.Supervisor
+	if cfg.Stream.Embedded {
+		sup = supervisor.New(log)
+		if _, err := os.Stat(cfg.Stream.FleetTelemetryConfig); err != nil {
+			log.Warn("fleet-telemetry config not found yet — run the onboarding wizard to generate it",
+				"path", cfg.Stream.FleetTelemetryConfig)
+		}
+		sup.Add(supervisor.Process{
+			Name: "fleet-telemetry",
+			Path: cfg.Stream.FleetTelemetryBin,
+			Args: []string{"-config", cfg.Stream.FleetTelemetryConfig},
+		})
+		// Ingest from the local dispatcher the embedded fleet-telemetry binds.
+		cfg.Ingest.ZMQAddr = localZMQ(cfg.Stream.ZMQBind)
+		sup.Start(ctx)
+		log.Info("embedded stream mode: supervising upstream Tesla processes",
+			"count", sup.Len(), "ingest", cfg.Ingest.ZMQAddr)
 	}
 
 	vins := make([]string, 0, len(cfg.Vehicles))
@@ -162,8 +190,6 @@ func main() {
 		}()
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	<-ctx.Done()
 	log.Info("shutting down")
 	if srv != nil {
@@ -171,6 +197,19 @@ func main() {
 		defer cancel()
 		_ = srv.Shutdown(sctx)
 	}
+	if sup != nil {
+		log.Info("waiting for supervised processes to stop")
+		sup.Wait()
+	}
+}
+
+// localZMQ turns a dispatcher bind address (e.g. tcp://0.0.0.0:5284) into the
+// loopback address the gateway connects to for an embedded fleet-telemetry.
+func localZMQ(bind string) string {
+	if i := strings.LastIndex(bind, ":"); i >= 0 {
+		return "tcp://127.0.0.1" + bind[i:]
+	}
+	return "tcp://127.0.0.1:5284"
 }
 
 func newLogger(level string) *slog.Logger {
