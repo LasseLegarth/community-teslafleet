@@ -51,10 +51,21 @@ func NewConsumer(cfg config.Ingest, st *store.Store, rec *recorder.Recorder, log
 	return &Consumer{addr: cfg.ZMQAddr, store: st, rec: rec, log: log, ctx: ctx, cancel: cancel, seenVINs: map[string]bool{}}
 }
 
-// Start dials the fleet-telemetry PUB socket and begins consuming.
+// Start dials the fleet-telemetry PUB socket and begins consuming. If the stream
+// isn't reachable yet (fleet-telemetry not up, DNS not resolving, network blip), it
+// does NOT fail — it keeps retrying in the background with backoff and starts
+// consuming once connected. A telemetry gateway must survive its upstream being
+// temporarily unavailable rather than crash-loop.
 func (c *Consumer) Start() error {
 	if err := c.dial(); err != nil {
-		return err
+		c.log.Warn("zmq ingest not reachable yet — retrying in background", "addr", c.addr, "err", err)
+		go func() {
+			if !c.reconnect() { // blocks (with backoff) until connected or ctx cancelled
+				return
+			}
+			c.loop()
+		}()
+		return nil
 	}
 	go c.loop()
 	return nil
