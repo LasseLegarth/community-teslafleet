@@ -18,6 +18,7 @@ import (
 	"github.com/legarth/community-teslafleet/internal/fleetapi"
 	"github.com/legarth/community-teslafleet/internal/hadiscovery"
 	"github.com/legarth/community-teslafleet/internal/ingest"
+	"github.com/legarth/community-teslafleet/internal/onboard"
 	"github.com/legarth/community-teslafleet/internal/recorder"
 	"github.com/legarth/community-teslafleet/internal/store"
 	"github.com/legarth/community-teslafleet/internal/vehicledata"
@@ -93,6 +94,21 @@ func main() {
 			} else if err != nil {
 				log.Warn("could not fetch vehicle display name; keeping default", "err", err)
 			}
+		}
+	}
+
+	// Onboarding wizard (optional) — its own listener, off the auth-less Fleet API port.
+	if cfg.Onboard.Enabled {
+		if ob, err := onboard.NewServer(cfg.Onboard.DataDir, cfg.Onboard.Password, log); err != nil {
+			log.Error("onboard init failed", "err", err)
+		} else {
+			osrv := &http.Server{Addr: cfg.Onboard.Listen, Handler: ob.Handler(), ReadHeaderTimeout: 10 * time.Second}
+			go func() {
+				log.Info("onboarding wizard listening", "addr", cfg.Onboard.Listen)
+				if err := osrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Error("onboard server error", "err", err)
+				}
+			}()
 		}
 	}
 

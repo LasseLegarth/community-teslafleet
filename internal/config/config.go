@@ -35,7 +35,18 @@ type Config struct {
 	Units         Units     `yaml:"units"`
 	State         State     `yaml:"state"`
 	Recording     Recording `yaml:"recording"`
+	Onboard       Onboard   `yaml:"onboard"`
 	LogLevel      string    `yaml:"log_level"`
+}
+
+// Onboard is the guided Tesla onboarding wizard (separate HTTP listener — keys/token
+// holder, kept off the auth-less Fleet API port). Standalone: open the port (set a
+// password). HA add-on: served via ingress (HA-authenticated).
+type Onboard struct {
+	Enabled  bool   `yaml:"enabled"`
+	Listen   string `yaml:"listen"`   // e.g. :8099
+	Password string `yaml:"password"` // optional basic-auth for standalone
+	DataDir  string `yaml:"data_dir"` // where keys/state live; default /data/onboard
 }
 
 // Recording appends every telemetry field update to a JSONL file for debugging
@@ -221,6 +232,7 @@ func Defaults() Config {
 		},
 		Units:     Units{System: "metric", RangeInput: "mi", SpeedInput: "mph", OdometerInput: "mi"},
 		Recording: Recording{Path: "/data/telemetry.jsonl", MaxMB: 100},
+		Onboard:   Onboard{Listen: ":8099", DataDir: "/data/onboard"},
 		// OnlineGrace 300s keeps a parked-but-connected car "online" between sparse
 		// battery telemetry updates (Soc 60s / RatedRange 120s); it flips to asleep
 		// only after telemetry genuinely stops. Keeps TeslaMate's WSS stream open.
@@ -414,6 +426,10 @@ func applyEnv(c *Config) {
 	setInt(&c.State.OnlineGraceSeconds, "TGW_STATE_ONLINE_GRACE_SECONDS")
 	setInt(&c.State.StaleAfterSeconds, "TGW_STATE_STALE_AFTER_SECONDS")
 	setBool(&c.State.ReportAsleepWhenIdle, "TGW_STATE_REPORT_ASLEEP_WHEN_IDLE")
+	setBool(&c.Onboard.Enabled, "TGW_ONBOARD_ENABLED")
+	setStr(&c.Onboard.Listen, "TGW_ONBOARD_LISTEN")
+	setStr(&c.Onboard.Password, "TGW_ONBOARD_PASSWORD")
+	setStr(&c.Onboard.DataDir, "TGW_ONBOARD_DATA_DIR")
 	setStr(&c.LogLevel, "TGW_LOG_LEVEL")
 
 	if len(c.Vehicles) == 0 {
