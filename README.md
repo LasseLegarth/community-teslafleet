@@ -111,12 +111,37 @@ the partner account, saves your refresh token, lists vehicles + shows the per-ca
 link, lets you pick a stream **profile** (eco/balanced/live) with a cost estimate, and
 enrolls telemetry.
 
-## Connectivity (you don't need Caddy or port 443)
+## Exposing the telemetry endpoint
 
-- **Custom port** — set `TELEMETRY_PORT` (e.g. `8443`); the car connects to `host:port`.
-- **TLS, no open ports** — get the cert via **certbot DNS-01** (no HTTP challenge).
-- **`.well-known` key** is a static file — host it on any HTTPS host on your domain.
-- **No open ports / CGNAT** — put the telemetry endpoint behind a **Cloudflare Tunnel**.
+The car has to reach your fleet-telemetry server from the internet (it dials *in*).
+Two ways to make that happen:
+
+### Option A — Port forward in your router (simplest)
+The car connects to `your-domain:port`; your router forwards that port to the machine
+running fleet-telemetry.
+- Forward an external port (e.g. `443` or a custom `8443`, set via `TELEMETRY_PORT`) →
+  `<host-ip>:<same-port>`. Point your domain's DNS at your **public IP** (use DDNS if it's dynamic).
+- **TLS:** fleet-telemetry terminates TLS itself with a Let's Encrypt cert — obtain it via
+  **certbot DNS-01** so you don't even need port 80 open for the challenge.
+- **Needs:** a public IP, router access, the port not blocked by your ISP, and you're **not** behind CGNAT.
+
+### Option B — Cloudflare Tunnel (no port forwarding / behind CGNAT)
+A `cloudflared` daemon makes an **outbound** connection to Cloudflare, which publishes a
+public hostname that tunnels in to your local fleet-telemetry.
+- **No open ports, no public/static IP — works behind CGNAT**, and Cloudflare provides the public TLS.
+- Run `cloudflared` pointing at `http://fleet-telemetry:<port>`; set your hostname's DNS to the tunnel.
+- **Caveat:** Cloudflare terminates TLS and forwards to fleet-telemetry (so omit `ca` in the
+  config → public trust). Works for the HTTP-based telemetry but is less battle-tested than
+  port-forward — confirm enrollment reaches `synced: true`.
+
+**Which?** Public IP + can open a port → **A** (simplest, proven). Behind CGNAT / can't or
+won't open ports / want to hide your IP → **B**.
+
+### The `.well-known` public key
+Separately, your partner public key is just a **static file** served over HTTPS at
+`https://<domain>/.well-known/appspecific/com.tesla.3p.public-key.pem`. Host it anywhere on
+your domain (Cloudflare/GitHub Pages, your existing web server, …) — it doesn't have to be
+this server. The onboarding wizard generates the file and verifies it's reachable.
 
 ## Units & privacy
 
