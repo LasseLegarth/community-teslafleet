@@ -57,15 +57,25 @@ publishing to Home Assistant's broker.
 
 ## Requirements
 
+**Always required** (the Tesla side — needed no matter how you use it):
+
 | | Why |
 |---|---|
-| **Home Assistant + MQTT** | the gateway publishes via MQTT discovery. The add-on auto-detects HA's broker; standalone points at any broker (e.g. Mosquitto). |
 | **A Tesla developer app** | free at [developer.tesla.com](https://developer.tesla.com) → `client_id` + `client_secret`. |
 | **A public domain with HTTPS** | Tesla fetches your partner public key at `https://<domain>/.well-known/...` and the car connects to a TLS telemetry hostname. |
 | **A publicly-reachable telemetry endpoint** | the car dials *in* — a public port (any port, not just 443), or a **Cloudflare Tunnel** if you can't open ports / are behind CGNAT. |
-| **Docker** (standalone) **or HA OS / Supervised** (add-on) | the standalone compose bundles `fleet-telemetry` + `vehicle-command-proxy`; the add-on requires HA OS/Supervised (not HA Container/Core). |
 | **A Fleet-Telemetry-capable Tesla** | most vehicles on recent firmware (≈2021+). One car or many. |
-| **TeslaMate** *(optional)* | only if you want the free local Fleet API for it. |
+| **A place to run it** | Docker/LXC (standalone — bundles `fleet-telemetry` + `vehicle-command-proxy`) **or** HA OS/Supervised (the add-on). |
+
+**Then pick what you want to feed — at least one:**
+
+| You want… | You also need |
+|---|---|
+| **Home Assistant integration** | Home Assistant + an MQTT broker (Mosquitto). The add-on auto-detects HA's broker; standalone points at any broker. *HA is only required for this — not for TeslaMate-only setups.* |
+| **TeslaMate logging (no HA)** | a running [TeslaMate](https://github.com/teslamate-org/teslamate); point `TESLA_API_HOST`/`TESLA_WSS_HOST` at the gateway. No HA or MQTT needed. |
+
+So: run it **standalone for TeslaMate only**, **as an HA add-on for Home Assistant only**,
+or **both at once**.
 
 > The domain + public reachability are Tesla's requirements, not this project's — they
 > can't be removed, only eased (the onboarding wizard + the connectivity options below).
