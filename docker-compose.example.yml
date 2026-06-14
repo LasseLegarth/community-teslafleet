@@ -1,0 +1,25 @@
+# Standalone self-host example for community-teslafleet.
+# Assumes you already run Tesla's fleet-telemetry with an MQTT sink
+# (topic_base must match mqtt.topic_base below).
+#
+# HA-only users: set TGW_FLEETAPI_ENABLED=false and point TGW_HA_BROKER at your HA broker.
+# TeslaMate users: keep fleetapi enabled and set TeslaMate's TESLA_API_HOST=http://<host>:4460
+
+services:
+  gateway:
+    image: ghcr.io/legarth/community-teslafleet:latest
+    # build: .          # uncomment to build locally instead of pulling
+    restart: unless-stopped
+    ports:
+      - "4460:4460"      # Fleet API emulator (TeslaMate polls this)
+    environment:
+      - TGW_INGEST_ZMQ_ADDR=tcp://fleet-telemetry:5284
+      - TGW_INGEST_NAMESPACE=tesla_telemetry
+      - TGW_FLEETAPI_ENABLED=true
+      - TGW_HA_ENABLED=true
+      - TGW_HA_BROKER=tcp://homeassistant.local:1883
+      # - TGW_HA_USERNAME=...
+      # - TGW_HA_PASSWORD=...
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - ./templates:/templates:ro

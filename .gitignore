@@ -1,0 +1,16 @@
+# Local config & captured templates may contain VIN / personal data
+config.yaml
+config.*.yaml
+!config.example.yaml
+templates/*.json
+!templates/*.example.json
+
+# Build artifacts
+/gateway
+/dist/
+*.test
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/

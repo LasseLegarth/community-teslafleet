@@ -1,0 +1,196 @@
+// Package wss implements Tesla's legacy streaming-WebSocket protocol so TeslaMate
+// (TESLA_WSS_HOST → here) gets near-instant drive-start detection, replacing the
+// MyTeslaMate bridge+shim. It pushes data:update CSV frames built from live state.
+//
+// Protocol: on connect send control:hello; client sends data:subscribe_oauth with
+// a tag (vehicle_id); we stream data:update with the 13 legacy fields in order:
+//
+//	time,speed,odometer,soc,elevation,est_heading,est_lat,est_lng,power,shift_state,range,est_range,heading
+package wss
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/legarth/community-teslafleet/internal/config"
+	"github.com/legarth/community-teslafleet/internal/store"
+	"github.com/legarth/community-teslafleet/internal/vehicledata"
+)
+
+type Server struct {
+	store    *store.Store
+	cfg      *config.Config
+	byKey    map[string]config.Vehicle // vehicle_id / id / vin -> vehicle
+	log      *slog.Logger
+	upgrader websocket.Upgrader
+	interval time.Duration
+}
+
+func NewServer(st *store.Store, cfg *config.Config, log *slog.Logger) *Server {
+	return &Server{
+		store:    st,
+		cfg:      cfg,
+		byKey:    config.VehiclesByKey(cfg),
+		log:      log,
+		upgrader: websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
+		interval: time.Second,
+	}
+}
+
+type inMsg struct {
+	MsgType string `json:"msg_type"`
+	Token   string `json:"token"`
+	Value   string `json:"value"`
+	Tag     string `json:"tag"`
+}
+
+// Handler upgrades to WebSocket and speaks the legacy streaming protocol.
+func (s *Server) Handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		conn, err := s.upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			s.log.Debug("wss upgrade failed", "err", err)
+			return
+		}
+		defer conn.Close()
+
+		var wmu sync.Mutex
+		write := func(v any) error {
+			wmu.Lock()
+			defer wmu.Unlock()
+			return conn.WriteJSON(v)
+		}
+
+		_ = write(map[string]any{"msg_type": "control:hello", "connection_timeout": 30000})
+
+		// One pusher goroutine per subscribed tag, each with its own stop channel.
+		var pmu sync.Mutex
+		pushers := map[string]chan struct{}{}
+		stopTag := func(tag string) {
+			if ch, ok := pushers[tag]; ok {
+				close(ch)
+				delete(pushers, tag)
+			}
+		}
+		stopAll := func() {
+			pmu.Lock()
+			defer pmu.Unlock()
+			for tag, ch := range pushers {
+				close(ch)
+				delete(pushers, tag)
+			}
+		}
+		defer stopAll()
+
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var m inMsg
+			if err := json.Unmarshal(data, &m); err != nil {
+				continue
+			}
+			switch m.MsgType {
+			case "data:subscribe_oauth":
+				veh, ok := s.byKey[m.Tag]
+				if !ok {
+					_ = write(map[string]any{"msg_type": "data:error", "tag": m.Tag, "error_type": "vehicle_error", "value": "unknown vehicle"})
+					continue
+				}
+				s.log.Info("wss subscribe", "tag", m.Tag, "vin", veh.VIN)
+				pmu.Lock()
+				stopTag(m.Tag) // replace any existing pusher for this tag
+				stop := make(chan struct{})
+				pushers[m.Tag] = stop
+				pmu.Unlock()
+				go s.push(veh, m.Tag, write, stop)
+			case "data:unsubscribe":
+				pmu.Lock()
+				if m.Tag != "" {
+					stopTag(m.Tag)
+				} else {
+					for tag := range pushers {
+						stopTag(tag)
+					}
+				}
+				pmu.Unlock()
+			}
+		}
+	}
+}
+
+func (s *Server) push(veh config.Vehicle, tag string, write func(any) error, stop chan struct{}) {
+	t := time.NewTicker(s.interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			snap, _ := s.store.Snapshot(veh.VIN)
+			now := s.store.Now()
+			d := store.Derive(snap, s.cfg.State, now)
+			csv := buildCSV(snap, d, s.cfg.Units, now)
+			if err := write(map[string]any{"msg_type": "data:update", "tag": tag, "value": csv}); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// buildCSV renders the 13 legacy streaming fields. Empty string = nil. power is
+// always numeric so TeslaMate treats it as a "real" online (not a subsystem probe).
+func buildCSV(snap store.Snapshot, d store.Derived, units config.Units, now time.Time) string {
+	f := make([]string, 13)
+	for i := range f {
+		f[i] = ""
+	}
+	f[0] = strconv.FormatInt(now.UnixMilli(), 10) // time
+
+	if d.Driving {
+		if v, ok := snap.Num(store.FieldVehicleSpeed); ok {
+			f[1] = strconv.Itoa(int(vehicledata.SpeedToMph(v, units.SpeedInput) + 0.5))
+		}
+	}
+	if v, ok := snap.Num(store.FieldOdometer); ok {
+		f[2] = strconv.FormatFloat(vehicledata.RangeToMiles(v, units.OdometerInput), 'f', 2, 64)
+	}
+	if v, ok := snap.Num(store.FieldSoc); ok {
+		f[3] = strconv.Itoa(int(v))
+	}
+	// f[4] elevation: not enrolled → empty
+	if v, ok := snap.Num(store.FieldGpsHeading); ok {
+		f[5] = strconv.Itoa(int(v))
+		f[12] = f[5] // heading
+	}
+	if lat, lng, ok := snap.Location(); ok {
+		f[6] = strconv.FormatFloat(lat, 'f', 6, 64)
+		f[7] = strconv.FormatFloat(lng, 'f', 6, 64)
+	}
+	f[8] = strconv.Itoa(drivePower(snap)) // power (numeric → real online)
+	if g, ok := snap.Field(store.FieldGear); ok {
+		f[9] = store.GearString(g.Value)
+	}
+	if v, ok := snap.Num(store.FieldRatedRange); ok {
+		f[10] = strconv.Itoa(int(vehicledata.RangeToMiles(v, units.RangeInput) + 0.5))
+	}
+	if v, ok := snap.Num(store.FieldEstBatteryRange); ok {
+		f[11] = strconv.Itoa(int(vehicledata.RangeToMiles(v, units.RangeInput) + 0.5))
+	}
+	return strings.Join(f, ",")
+}
+
+func drivePower(snap store.Snapshot) int {
+	if p, ok := snap.ChargerPower(); ok && p > 0 {
+		return -int(p) // charging draws negative drive power
+	}
+	return 0
+}

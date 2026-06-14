@@ -1,0 +1,376 @@
+// Package config loads gateway configuration from a YAML file with environment
+// variable overrides. Everything is config-driven so the project is generic and
+// distributable — no hardcoded IPs, VINs or unit assumptions.
+//
+// Ingest is brokerless: fleet-telemetry's ZMQ dispatcher PUB-binds an address and
+// the gateway SUB-connects. Egress to Home Assistant is a normal MQTT client.
+package config
+
+import (
+	"fmt"
+	"log/slog"
+	"os"
+	"strconv"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+type Config struct {
+	Ingest   Ingest    `yaml:"ingest"`
+	HTTP     HTTP      `yaml:"http"`
+	FleetAPI FleetAPI  `yaml:"fleetapi"`
+	HA       HA        `yaml:"ha"`
+	Commands Commands  `yaml:"commands"`
+	Vehicles  []Vehicle `yaml:"vehicles"`
+	Units     Units     `yaml:"units"`
+	State     State     `yaml:"state"`
+	Recording Recording `yaml:"recording"`
+	LogLevel  string    `yaml:"log_level"`
+}
+
+// Recording appends every telemetry field update to a JSONL file for debugging
+// value changes over time (e.g. a whole drive). Opt-in.
+type Recording struct {
+	Enabled bool   `yaml:"enabled"`
+	Path    string `yaml:"path"`   // e.g. /data/telemetry.jsonl
+	MaxMB   int    `yaml:"max_mb"` // rotate at this size (one backup kept)
+}
+
+// Commands enables the command relay: HA buttons/switches → signed Tesla commands
+// via the vehicle-command proxy. Needs a cmd-scoped OAuth token the gateway refreshes.
+type Commands struct {
+	Enabled      bool   `yaml:"enabled"`
+	ProxyURL     string `yaml:"proxy_url"`  // vehicle-command proxy, e.g. https://vehicle-command-proxy:4443
+	AuthHost     string `yaml:"auth_host"`  // https://auth.tesla.com
+	AuthPath     string `yaml:"auth_path"`  // /oauth2/v3
+	ClientID     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"`
+	RefreshToken string `yaml:"refresh_token"`
+	// TokenCache persists the (rotating) refresh token across restarts. Tesla
+	// rotates the refresh token on use; the cached value takes precedence over
+	// RefreshToken on startup. Mount a writable volume for this path.
+	TokenCache string `yaml:"token_cache"`
+	// EnrollFile is the path to a fleet_telemetry_config JSON file pushed to the
+	// vehicle-command proxy via POST /admin/enroll (self-enroll). Default /data/ftc.json.
+	EnrollFile string `yaml:"enroll_file"`
+	// FleetAPIURL is the regional Fleet API base (e.g.
+	// https://fleet-api.prd.eu.vn.cloud.tesla.com). Only needed for commands that
+	// are NOT end-to-end-signed and therefore not routed by the vehicle-command
+	// proxy (navigation_request). Leave empty to hide those entities.
+	FleetAPIURL string `yaml:"fleet_api_url"`
+	// PINs for PIN-gated commands. An entity is only exposed when its PIN is set.
+	ValetPIN      string `yaml:"valet_pin"`
+	SpeedLimitPIN string `yaml:"speed_limit_pin"`
+	PinToDrivePIN string `yaml:"pin_to_drive_pin"`
+}
+
+// Ingest is the brokerless ZMQ feed from fleet-telemetry (zmq dispatcher).
+type Ingest struct {
+	ZMQAddr   string `yaml:"zmq_addr"`  // e.g. tcp://fleet-telemetry:5284
+	Namespace string `yaml:"namespace"` // fleet-telemetry namespace (topic prefix)
+}
+
+type HTTP struct {
+	Listen string `yaml:"listen"` // e.g. :4460
+}
+
+// FleetAPI toggles the Tesla Fleet API emulator (for TeslaMate to poll).
+type FleetAPI struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// HA toggles Home Assistant MQTT auto-discovery (egress to HA's own broker).
+type HA struct {
+	Enabled         bool   `yaml:"enabled"`
+	Broker          string `yaml:"broker"` // HA's MQTT broker, e.g. tcp://192.168.1.10:1883
+	Username        string `yaml:"username"`
+	Password        string `yaml:"password"`
+	ClientID        string `yaml:"client_id"`
+	DiscoveryPrefix string `yaml:"discovery_prefix"` // default homeassistant
+	StateTopicBase  string `yaml:"state_topic_base"` // default tgw
+	// PublishIntervalSeconds is how often per-VIN state is republished to HA.
+	// Lower = more live device_tracker/position; defaults to 2 if <=0.
+	PublishIntervalSeconds int `yaml:"publish_interval_seconds"`
+	// IdentifierMode controls the public identifier used in MQTT topics, unique_id,
+	// object_id and the HA device identifiers: "name" (slug of the car's name — keeps
+	// the VIN out of entity_ids) or "vin" (use the VIN). Default "name". The VIN is
+	// always available as the device serial_number regardless of this setting.
+	IdentifierMode string `yaml:"device_identifier"`
+	// UniqueIDSalt is mixed into every entity unique_id. Bump it (any new value) to
+	// force HA to mint fresh entities — useful to escape sticky entity_ids left over
+	// from earlier collisions (HA never auto-renames an entity_id once assigned).
+	// Leave empty normally; object_ids/topics are unaffected.
+	UniqueIDSalt string `yaml:"unique_id_salt"`
+}
+
+type Vehicle struct {
+	VIN         string `yaml:"vin"`
+	DisplayName string `yaml:"display_name"`
+	Template    string `yaml:"template"` // path to captured vehicle_data template JSON
+	ID          int64  `yaml:"id"`
+	VehicleID   int64  `yaml:"vehicle_id"`
+}
+
+// IDString is the decimal string form of the vehicle's ID.
+func (v Vehicle) IDString() string {
+	return strconv.FormatInt(v.ID, 10)
+}
+
+// Slug is a filesystem/entity-id-safe form of the display name, used (in "name"
+// identifier mode) as the HA object_id/topic prefix so entity_ids read e.g.
+// "sensor.tesla_test_battery" instead of exposing the VIN. When no real name is
+// available it falls back to "tesla_<hash>" — an opaque stable id derived from the
+// VIN, never the VIN itself (which is PII).
+func (v Vehicle) Slug() string {
+	base := v.DisplayName
+	if base == "" || base == v.VIN {
+		return "tesla_" + vinHash(v.VIN)
+	}
+	var b strings.Builder
+	prevUnderscore := false
+	for _, r := range strings.ToLower(base) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevUnderscore = false
+		case !prevUnderscore:
+			b.WriteRune('_')
+			prevUnderscore = true
+		}
+	}
+	s := strings.Trim(b.String(), "_")
+	if s == "" {
+		return "tesla_" + vinHash(v.VIN)
+	}
+	return s
+}
+
+// vinHash is a short, stable, non-reversible-at-a-glance id derived from the VIN
+// (FNV-1a, 24 bits → 6 hex). Used as an opaque fallback identifier, never exposing
+// the raw VIN.
+func vinHash(vin string) string {
+	var h uint32 = 2166136261
+	for i := 0; i < len(vin); i++ {
+		h ^= uint32(vin[i])
+		h *= 16777619
+	}
+	return fmt.Sprintf("%06x", h&0xffffff)
+}
+
+// VehiclesByKey builds a lookup of vehicles keyed by VIN, ID and VehicleID
+// (all as strings), shared by the Fleet API and WSS servers.
+func VehiclesByKey(cfg *Config) map[string]Vehicle {
+	byKey := make(map[string]Vehicle, len(cfg.Vehicles)*3)
+	for _, v := range cfg.Vehicles {
+		byKey[v.VIN] = v
+		byKey[strconv.FormatInt(v.ID, 10)] = v
+		byKey[strconv.FormatInt(v.VehicleID, 10)] = v
+	}
+	return byKey
+}
+
+// Units controls unit handling. The fleet-telemetry stream emits distance/speed in
+// the *Input units (Tesla streams miles/mph by convention; verified), temperature in
+// °C and pressure in bar. vehicle_data (for TeslaMate) is always normalized to miles
+// using the *Input fields. The Home Assistant display unit is chosen via System
+// (metric → km, km/h, °C, bar | imperial → mi, mph, °F, psi); users can still
+// override per entity in HA's UI.
+type Units struct {
+	System        string `yaml:"system"`         // metric|imperial — HA display
+	RangeInput    string `yaml:"range_input"`    // stream unit km|mi
+	SpeedInput    string `yaml:"speed_input"`    // stream unit kmh|mph
+	OdometerInput string `yaml:"odometer_input"` // stream unit km|mi
+}
+
+type State struct {
+	StaleAfterSeconds    int  `yaml:"stale_after_seconds"`
+	OnlineGraceSeconds   int  `yaml:"online_grace_seconds"`
+	ReportAsleepWhenIdle bool `yaml:"report_asleep_when_idle"`
+}
+
+func Defaults() Config {
+	return Config{
+		Ingest:   Ingest{ZMQAddr: "tcp://fleet-telemetry:5284", Namespace: "tesla_telemetry"},
+		HTTP:     HTTP{Listen: ":4460"},
+		FleetAPI: FleetAPI{Enabled: true},
+		HA: HA{
+			Enabled:         true,
+			ClientID:        "community-teslafleet",
+			DiscoveryPrefix:        "homeassistant",
+			StateTopicBase:         "tgw",
+			PublishIntervalSeconds: 2,
+			IdentifierMode:         "name",
+		},
+		Commands: Commands{
+			ProxyURL:   "https://vehicle-command-proxy:4443",
+			AuthHost:   "https://auth.tesla.com",
+			AuthPath:   "/oauth2/v3",
+			TokenCache: "/data/refresh_token",
+			EnrollFile: "/data/ftc.json",
+		},
+		Units:     Units{System: "metric", RangeInput: "mi", SpeedInput: "mph", OdometerInput: "mi"},
+		Recording: Recording{Path: "/data/telemetry.jsonl", MaxMB: 100},
+		// OnlineGrace 300s keeps a parked-but-connected car "online" between sparse
+		// battery telemetry updates (Soc 60s / RatedRange 120s); it flips to asleep
+		// only after telemetry genuinely stops. Keeps TeslaMate's WSS stream open.
+		State:    State{StaleAfterSeconds: 660, OnlineGraceSeconds: 300},
+		LogLevel: "info",
+	}
+}
+
+// Load reads the YAML file at path (if it exists) over defaults, then applies
+// TGW_* environment overrides. A missing file is not an error.
+func Load(path string) (Config, error) {
+	cfg := Defaults()
+	if path != "" {
+		if b, err := os.ReadFile(path); err == nil {
+			if err := yaml.Unmarshal(b, &cfg); err != nil {
+				return cfg, fmt.Errorf("parse config %s: %w", path, err)
+			}
+		} else if !os.IsNotExist(err) {
+			return cfg, fmt.Errorf("read config %s: %w", path, err)
+		}
+	}
+	applyEnv(&cfg)
+	if err := cfg.validate(); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
+}
+
+func applyEnv(c *Config) {
+	setStr(&c.Ingest.ZMQAddr, "TGW_INGEST_ZMQ_ADDR")
+	setStr(&c.Ingest.Namespace, "TGW_INGEST_NAMESPACE")
+	setStr(&c.HTTP.Listen, "TGW_HTTP_LISTEN")
+	setBool(&c.FleetAPI.Enabled, "TGW_FLEETAPI_ENABLED")
+	setBool(&c.HA.Enabled, "TGW_HA_ENABLED")
+	setStr(&c.HA.Broker, "TGW_HA_BROKER")
+	setStr(&c.HA.Username, "TGW_HA_USERNAME")
+	setStr(&c.HA.Password, "TGW_HA_PASSWORD")
+	setStr(&c.HA.ClientID, "TGW_HA_CLIENT_ID")
+	setStr(&c.HA.DiscoveryPrefix, "TGW_HA_DISCOVERY_PREFIX")
+	setStr(&c.HA.StateTopicBase, "TGW_HA_STATE_TOPIC_BASE")
+	setInt(&c.HA.PublishIntervalSeconds, "TGW_HA_PUBLISH_INTERVAL_SECONDS")
+	setStr(&c.HA.IdentifierMode, "TGW_HA_DEVICE_IDENTIFIER")
+	setStr(&c.HA.UniqueIDSalt, "TGW_HA_UNIQUE_ID_SALT")
+	setStr(&c.Units.System, "TGW_UNITS_SYSTEM")
+	setStr(&c.Units.RangeInput, "TGW_UNITS_RANGE_INPUT")
+	setStr(&c.Units.SpeedInput, "TGW_UNITS_SPEED_INPUT")
+	setStr(&c.Units.OdometerInput, "TGW_UNITS_ODOMETER_INPUT")
+	setBool(&c.Commands.Enabled, "TGW_COMMANDS_ENABLED")
+	setStr(&c.Commands.ProxyURL, "TGW_TESLA_PROXY_URL")
+	setStr(&c.Commands.AuthHost, "TGW_TESLA_AUTH_HOST")
+	setStr(&c.Commands.AuthPath, "TGW_TESLA_AUTH_PATH")
+	setStr(&c.Commands.ClientID, "TGW_TESLA_CLIENT_ID")
+	setStr(&c.Commands.ClientSecret, "TGW_TESLA_CLIENT_SECRET")
+	setStr(&c.Commands.RefreshToken, "TGW_TESLA_REFRESH_TOKEN")
+	setStr(&c.Commands.TokenCache, "TGW_TESLA_TOKEN_CACHE")
+	setStr(&c.Commands.EnrollFile, "TGW_ENROLL_FILE")
+	setStr(&c.Commands.FleetAPIURL, "TGW_TESLA_FLEET_API_URL")
+	setStr(&c.Commands.ValetPIN, "TGW_TESLA_VALET_PIN")
+	setStr(&c.Commands.SpeedLimitPIN, "TGW_TESLA_SPEED_LIMIT_PIN")
+	setStr(&c.Commands.PinToDrivePIN, "TGW_TESLA_PIN_TO_DRIVE_PIN")
+	setBool(&c.Recording.Enabled, "TGW_RECORDING_ENABLED")
+	setStr(&c.Recording.Path, "TGW_RECORDING_PATH")
+	setInt(&c.Recording.MaxMB, "TGW_RECORDING_MAX_MB")
+	setInt(&c.State.OnlineGraceSeconds, "TGW_STATE_ONLINE_GRACE_SECONDS")
+	setInt(&c.State.StaleAfterSeconds, "TGW_STATE_STALE_AFTER_SECONDS")
+	setBool(&c.State.ReportAsleepWhenIdle, "TGW_STATE_REPORT_ASLEEP_WHEN_IDLE")
+	setStr(&c.LogLevel, "TGW_LOG_LEVEL")
+
+	if len(c.Vehicles) == 0 {
+		if v := os.Getenv("TGW_VINS"); v != "" {
+			dir := os.Getenv("TGW_TEMPLATE_DIR")
+			for _, vin := range strings.Split(v, ",") {
+				vin = strings.TrimSpace(vin)
+				if vin == "" {
+					continue
+				}
+				veh := Vehicle{VIN: vin}
+				if dir != "" {
+					veh.Template = strings.TrimRight(dir, "/") + "/" + vin + ".json"
+				}
+				c.Vehicles = append(c.Vehicles, veh)
+			}
+		}
+	}
+}
+
+func (c *Config) validate() error {
+	if c.Ingest.ZMQAddr == "" {
+		return fmt.Errorf("ingest.zmq_addr is required")
+	}
+	if c.Ingest.Namespace == "" {
+		return fmt.Errorf("ingest.namespace is required")
+	}
+	if len(c.Vehicles) == 0 {
+		return fmt.Errorf("at least one vehicle (vin) is required (config vehicles[] or TGW_VINS)")
+	}
+	for i := range c.Vehicles {
+		if c.Vehicles[i].VIN == "" {
+			return fmt.Errorf("vehicles[%d].vin is required", i)
+		}
+		if c.Vehicles[i].ID == 0 {
+			c.Vehicles[i].ID = deriveID(c.Vehicles[i].VIN)
+		}
+		if c.Vehicles[i].VehicleID == 0 {
+			c.Vehicles[i].VehicleID = c.Vehicles[i].ID
+		}
+		if c.Vehicles[i].DisplayName == "" {
+			c.Vehicles[i].DisplayName = c.Vehicles[i].VIN
+		}
+	}
+	if c.HA.Enabled && c.HA.Broker == "" {
+		return fmt.Errorf("ha.broker is required when ha.enabled")
+	}
+	if c.Commands.Enabled {
+		if !c.HA.Enabled {
+			return fmt.Errorf("commands.enabled requires ha.enabled (commands arrive via HA MQTT)")
+		}
+		if c.Commands.ClientID == "" || c.Commands.RefreshToken == "" {
+			return fmt.Errorf("commands.enabled requires client_id and refresh_token")
+		}
+		if c.Commands.ProxyURL == "" {
+			return fmt.Errorf("commands.proxy_url is required when commands.enabled")
+		}
+	}
+	return nil
+}
+
+// deriveID produces a stable positive int64 id from a VIN (FNV-1a) so TeslaMate
+// has a consistent vehicle id across restarts.
+func deriveID(vin string) int64 {
+	var h uint64 = 1469598103934665603
+	for i := 0; i < len(vin); i++ {
+		h ^= uint64(vin[i])
+		h *= 1099511628211
+	}
+	return int64(h%1_000_000_000_000) + 1
+}
+
+func setStr(dst *string, env string) {
+	if v, ok := os.LookupEnv(env); ok {
+		*dst = v
+	}
+}
+
+func setBool(dst *bool, env string) {
+	if v, ok := os.LookupEnv(env); ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			*dst = b
+		} else {
+			slog.Warn("ignoring unparseable bool env var", "env", env, "value", v, "err", err)
+		}
+	}
+}
+
+func setInt(dst *int, env string) {
+	if v, ok := os.LookupEnv(env); ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			*dst = n
+		} else {
+			slog.Warn("ignoring unparseable int env var", "env", env, "value", v, "err", err)
+		}
+	}
+}

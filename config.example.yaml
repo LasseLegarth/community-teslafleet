@@ -1,0 +1,62 @@
+# community-teslafleet — example configuration.
+# Everything here can also be set via TGW_* environment variables (env wins).
+# Copy to config.yaml and edit. Two profiles:
+#   - HA-only:  fleetapi.enabled: false   (just Home Assistant)
+#   - Full:     fleetapi.enabled: true    (also serves TeslaMate)
+
+# Brokerless ingest: fleet-telemetry's zmq dispatcher PUB-binds an address and
+# this gateway SUB-connects. In fleet-telemetry config, route V (and connectivity)
+# to a "zmq" dispatcher with transmit_decoded_records: true and addr tcp://0.0.0.0:5284.
+ingest:
+  zmq_addr: "tcp://fleet-telemetry:5284"  # TGW_INGEST_ZMQ_ADDR
+  namespace: "tesla_telemetry"            # TGW_INGEST_NAMESPACE (fleet-telemetry namespace)
+
+# Fleet API emulator (TeslaMate sets TESLA_API_HOST to this service).
+fleetapi:
+  enabled: true                       # TGW_FLEETAPI_ENABLED
+
+http:
+  listen: ":4460"                     # TGW_HTTP_LISTEN
+
+# Home Assistant MQTT auto-discovery. Broker may differ from the consume broker
+# (HA usually runs its own mosquitto). Empty broker reuses mqtt.broker.
+ha:
+  enabled: true                       # TGW_HA_ENABLED
+  broker: ""                          # TGW_HA_BROKER e.g. tcp://192.168.1.10:1883
+  username: ""
+  password: ""
+  discovery_prefix: "homeassistant"
+  state_topic_base: "tgw"
+
+# Declare what UNITS your telemetry stream emits, so vehicle_data (always miles
+# for TeslaMate) is converted correctly. Flip to mi/mph if your firmware emits
+# imperial. Verify against the Tesla app once.
+units:
+  range_input: "km"      # km | mi
+  speed_input: "kmh"     # kmh | mph
+  odometer_input: "km"   # km | mi
+
+# Command relay: HA buttons/switches → signed Tesla commands via the
+# vehicle-command proxy. Needs a cmd-scoped OAuth token the gateway refreshes
+# itself. Requires ha.enabled. Generate the refresh_token once (vehicle_cmds scope).
+commands:
+  enabled: false                          # TGW_COMMANDS_ENABLED
+  proxy_url: "https://vehicle-command-proxy:4443"  # tesla/vehicle-command proxy
+  auth_host: "https://auth.tesla.com"
+  auth_path: "/oauth2/v3"
+  client_id: ""                           # TGW_TESLA_CLIENT_ID
+  client_secret: ""                       # TGW_TESLA_CLIENT_SECRET (keep in secrets/.env)
+  refresh_token: ""                       # TGW_TESLA_REFRESH_TOKEN (cmd-scoped, secret)
+
+state:
+  stale_after_seconds: 660       # no telemetry this long → may report asleep
+  online_grace_seconds: 60
+  report_asleep_when_idle: false # true = tell TeslaMate "asleep" when idle even if Sentry keeps the modem online
+
+log_level: "info"        # debug | info | warn | error
+
+vehicles:
+  - vin: "5YJ3XXXXXXXXXXXXX"
+    display_name: "My Tesla"
+    template: "/templates/5YJ3XXXXXXXXXXXXX.json"   # captured vehicle_data (see templates/README.md)
+    # id / vehicle_id are derived from the VIN if omitted.

@@ -1,0 +1,636 @@
+// Package commands relays Home Assistant button/switch presses to signed Tesla
+// commands via the vehicle-command proxy. It holds a cmd-scoped OAuth token and
+// refreshes it itself (refresh_token grant against auth.tesla.com).
+package commands
+
+import (
+	"bytes"
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/legarth/community-teslafleet/internal/config"
+	"github.com/legarth/community-teslafleet/internal/store"
+)
+
+// Entity is a command entity exposed in Home Assistant.
+type Entity struct {
+	Key       string // object_id + command-topic key
+	Component string // button | switch | lock | number | select | cover | climate
+	Name      string
+	// number
+	Min, Max, Step float64
+	Unit           string
+	// select
+	Options []string
+	// cover
+	DeviceClass string // door | window (cover)
+	// StateKey is the value_json key reflecting current state (switch/lock/number/
+	// cover). Empty → optimistic/write-only entity (HA assumes the commanded state).
+	StateKey string
+}
+
+// Entities is the catalog of command entities published to HA and handled here.
+// Excluded by design: PIN/password-gated (valet, speed-limit, pin-to-drive),
+// destructive (erase_user_data), and model-specific commands that 404 on a Model 3
+// (bioweapon, tonneau, sunroof, seat coolers).
+func Entities(cfg config.Commands) []Entity {
+	es := []Entity{
+		// Buttons (momentary).
+		{Key: "flash_lights", Component: "button", Name: "Flash lights"},
+		{Key: "honk", Component: "button", Name: "Honk"},
+		{Key: "wake", Component: "button", Name: "Wake up"},
+		{Key: "charge_max_range", Component: "button", Name: "Charge to max range"},
+		{Key: "charge_standard", Component: "button", Name: "Charge to standard"},
+		{Key: "remote_start", Component: "button", Name: "Remote start"},
+		{Key: "homelink", Component: "button", Name: "Trigger HomeLink"},
+		{Key: "media_toggle", Component: "button", Name: "Media play/pause"},
+		{Key: "media_next", Component: "button", Name: "Media next"},
+		{Key: "media_prev", Component: "button", Name: "Media previous"},
+		{Key: "media_vol_up", Component: "button", Name: "Volume up"},
+		{Key: "media_vol_down", Component: "button", Name: "Volume down"},
+		// Switches.
+		{Key: "charging", Component: "switch", Name: "Charging", StateKey: "charging"},
+		{Key: "sentry", Component: "switch", Name: "Sentry mode", StateKey: "sentry"},
+		{Key: "steering_wheel_heater", Component: "switch", Name: "Steering wheel heater"},
+		{Key: "cabin_overheat", Component: "switch", Name: "Cabin overheat protection"},
+		{Key: "preconditioning_max", Component: "switch", Name: "Preconditioning (max)"},
+		{Key: "guest_mode", Component: "switch", Name: "Guest mode"},
+		// Lock.
+		{Key: "lock", Component: "lock", Name: "Lock", StateKey: "locked"},
+		// Climate (proper thermostat entity: on/off + target temp + current temp).
+		{Key: "climate", Component: "climate", Name: "Climate"},
+		// Covers (frunk/trunk are optimistic — Tesla streams no open-state for them;
+		// charge port + windows have real state).
+		{Key: "charge_port", Component: "cover", Name: "Charge port", DeviceClass: "door", StateKey: "charge_port"},
+		{Key: "windows", Component: "cover", Name: "Windows", DeviceClass: "window", StateKey: "windows"},
+		{Key: "frunk", Component: "cover", Name: "Frunk", DeviceClass: "door"},
+		{Key: "trunk", Component: "cover", Name: "Trunk", DeviceClass: "door"},
+		// Numbers.
+		{Key: "charge_limit", Component: "number", Name: "Charge limit", Min: 50, Max: 100, Step: 1, Unit: "%", StateKey: "charge_limit"},
+		{Key: "charging_amps", Component: "number", Name: "Charging amps", Min: 0, Max: 32, Step: 1, Unit: "A"},
+		// Selects (write-only/optimistic).
+		{Key: "climate_keeper", Component: "select", Name: "Climate keeper", Options: []string{"off", "keep", "dog", "camp"}},
+		{Key: "seat_heater_front_left", Component: "select", Name: "Seat heater front left", Options: seatLevels},
+		{Key: "seat_heater_front_right", Component: "select", Name: "Seat heater front right", Options: seatLevels},
+		{Key: "seat_heater_rear_left", Component: "select", Name: "Seat heater rear left", Options: seatLevels},
+		{Key: "seat_heater_rear_center", Component: "select", Name: "Seat heater rear center", Options: seatLevels},
+		{Key: "seat_heater_rear_right", Component: "select", Name: "Seat heater rear right", Options: seatLevels},
+		// Software updates.
+		{Key: "software_update", Component: "update", Name: "Software update"},
+		{Key: "cancel_update", Component: "button", Name: "Cancel software update"},
+	}
+	// Navigation needs the regional Fleet API (navigation_request is not proxy-routed).
+	if cfg.FleetAPIURL != "" {
+		es = append(es, Entity{Key: "navigate", Component: "text", Name: "Navigate to"})
+	}
+	// PIN-gated commands — only exposed when the PIN is configured.
+	if cfg.ValetPIN != "" {
+		es = append(es, Entity{Key: "valet", Component: "switch", Name: "Valet mode"})
+	}
+	if cfg.SpeedLimitPIN != "" {
+		es = append(es,
+			Entity{Key: "speed_limit", Component: "switch", Name: "Speed limit"},
+			Entity{Key: "speed_limit_value", Component: "number", Name: "Speed limit value", Min: 50, Max: 90, Step: 1, Unit: "mph"},
+		)
+	}
+	if cfg.PinToDrivePIN != "" {
+		es = append(es, Entity{Key: "pin_to_drive", Component: "switch", Name: "PIN to drive"})
+	}
+	return es
+}
+
+var seatLevels = []string{"off", "low", "medium", "high"}
+
+// seatPositions maps a seat-heater entity key to the Tesla seat_position index.
+var seatPositions = map[string]int{
+	"seat_heater_front_left":  0,
+	"seat_heater_front_right": 1,
+	"seat_heater_rear_left":   2,
+	"seat_heater_rear_center": 4,
+	"seat_heater_rear_right":  5,
+}
+
+// locator supplies a vehicle's last-known GPS, needed by commands like
+// window_control (close) and trigger_homelink. Implemented by *store.Store.
+type locator interface {
+	Snapshot(vin string) (store.Snapshot, bool)
+}
+
+type Relay struct {
+	tm        *tokenManager
+	proxy     string
+	client    *http.Client
+	apiClient *http.Client // TLS-verifying client for the public Fleet API (navigation)
+	fleetAPI  string
+	valetPIN  string
+	speedPIN  string
+	drivePIN  string
+	log       *slog.Logger
+	knownVINs map[string]bool
+	store     locator
+}
+
+// NewRelay builds the command relay. knownVINs is the set of configured VINs;
+// commands for any VIN not in this set are rejected so an unvalidated VIN can
+// never be interpolated into a proxy URL. store supplies GPS for location-gated
+// commands (may be nil).
+func NewRelay(cfg config.Commands, knownVINs []string, st locator, log *slog.Logger) *Relay {
+	// Self-signed proxy cert → skip verify on the internal hop.
+	insecure := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+	known := make(map[string]bool, len(knownVINs))
+	for _, vin := range knownVINs {
+		known[vin] = true
+	}
+	r := &Relay{
+		tm:        newTokenManager(cfg, log),
+		proxy:     strings.TrimRight(cfg.ProxyURL, "/"),
+		client:    insecure,
+		apiClient: &http.Client{Timeout: 30 * time.Second},
+		fleetAPI:  strings.TrimRight(cfg.FleetAPIURL, "/"),
+		valetPIN:  cfg.ValetPIN,
+		speedPIN:  cfg.SpeedLimitPIN,
+		drivePIN:  cfg.PinToDrivePIN,
+		log:       log,
+		knownVINs: known,
+		store:     st,
+	}
+	// Eager refresh so we know at startup whether the token is valid (and persist
+	// the rotated token immediately). Commands won't work without a valid token.
+	if _, err := r.tm.token(); err != nil {
+		log.Error("initial token refresh FAILED — commands disabled until a valid refresh_token is provided", "err", err)
+	}
+	return r
+}
+
+// Handle maps an HA command (key + payload) to a Tesla command and sends it.
+func (r *Relay) Handle(vin, key, payload string) {
+	if !r.knownVINs[vin] {
+		r.log.Warn("rejecting command for unknown VIN", "vin", vin, "key", key)
+		return
+	}
+	var err error
+	switch key {
+	// --- buttons ---
+	case "flash_lights":
+		err = r.command(vin, "flash_lights", nil)
+	case "honk":
+		err = r.command(vin, "honk_horn", nil)
+	case "wake":
+		err = r.wake(vin)
+	// --- covers (frunk/trunk are toggles → OPEN and CLOSE both actuate) ---
+	case "frunk":
+		err = r.command(vin, "actuate_trunk", map[string]any{"which_trunk": "front"})
+	case "trunk":
+		err = r.command(vin, "actuate_trunk", map[string]any{"which_trunk": "rear"})
+	case "charge_port":
+		if coverOpen(payload) {
+			err = r.command(vin, "charge_port_door_open", nil)
+		} else {
+			err = r.command(vin, "charge_port_door_close", nil)
+		}
+	case "windows":
+		if coverOpen(payload) {
+			err = r.command(vin, "window_control", map[string]any{"command": "vent", "lat": 0, "lon": 0})
+		} else {
+			lat, lon, ok := r.latlon(vin)
+			if !ok {
+				r.log.Warn("close windows needs GPS but none known", "vin", vin)
+				return
+			}
+			err = r.command(vin, "window_control", map[string]any{"command": "close", "lat": lat, "lon": lon})
+		}
+	case "charge_max_range":
+		err = r.command(vin, "charge_max_range", nil)
+	case "charge_standard":
+		err = r.command(vin, "charge_standard", nil)
+	case "remote_start":
+		err = r.command(vin, "remote_start_drive", nil)
+	case "homelink":
+		lat, lon, ok := r.latlon(vin)
+		if !ok {
+			r.log.Warn("homelink needs GPS but none known", "vin", vin)
+			return
+		}
+		err = r.command(vin, "trigger_homelink", map[string]any{"lat": lat, "lon": lon})
+	case "media_toggle":
+		err = r.command(vin, "media_toggle_playback", nil)
+	case "media_next":
+		err = r.command(vin, "media_next_track", nil)
+	case "media_prev":
+		err = r.command(vin, "media_prev_track", nil)
+	case "media_vol_up":
+		err = r.command(vin, "media_volume_up", nil)
+	case "media_vol_down":
+		err = r.command(vin, "media_volume_down", nil)
+
+	// --- switches ---
+	case "charging":
+		if isOn(payload) {
+			err = r.command(vin, "charge_start", nil)
+		} else {
+			err = r.command(vin, "charge_stop", nil)
+		}
+	case "sentry":
+		err = r.command(vin, "set_sentry_mode", map[string]any{"on": isOn(payload)})
+	case "climate_mode":
+		if strings.EqualFold(strings.TrimSpace(payload), "off") {
+			err = r.command(vin, "auto_conditioning_stop", nil)
+		} else {
+			err = r.command(vin, "auto_conditioning_start", nil)
+		}
+	case "steering_wheel_heater":
+		err = r.command(vin, "remote_steering_wheel_heater_request", map[string]any{"on": isOn(payload)})
+	case "cabin_overheat":
+		err = r.command(vin, "set_cabin_overheat_protection", map[string]any{"on": isOn(payload), "fan_only": false})
+	case "preconditioning_max":
+		err = r.command(vin, "set_preconditioning_max", map[string]any{"on": isOn(payload), "manual_override": true})
+	case "guest_mode":
+		err = r.command(vin, "guest_mode", map[string]any{"enable": isOn(payload)})
+
+	// --- lock ---
+	case "lock":
+		if strings.EqualFold(payload, "LOCK") {
+			err = r.command(vin, "door_lock", nil)
+		} else {
+			err = r.command(vin, "door_unlock", nil)
+		}
+
+	// --- numbers ---
+	case "charge_limit":
+		pct, e := parseNum(payload)
+		if e != nil {
+			r.log.Warn("bad charge_limit payload", "payload", payload)
+			return
+		}
+		err = r.command(vin, "set_charge_limit", map[string]any{"percent": int(pct)})
+	case "charging_amps":
+		a, e := parseNum(payload)
+		if e != nil {
+			r.log.Warn("bad charging_amps payload", "payload", payload)
+			return
+		}
+		err = r.command(vin, "set_charging_amps", map[string]any{"charging_amps": int(a)})
+	case "climate_temp":
+		t, e := parseNum(payload)
+		if e != nil {
+			r.log.Warn("bad climate_temp payload", "payload", payload)
+			return
+		}
+		err = r.command(vin, "set_temps", map[string]any{"driver_temp": t, "passenger_temp": t})
+
+	// --- selects ---
+	case "climate_keeper":
+		mode := map[string]int{"off": 0, "keep": 1, "dog": 2, "camp": 3}[strings.ToLower(strings.TrimSpace(payload))]
+		err = r.command(vin, "set_climate_keeper_mode", map[string]any{"climate_keeper_mode": mode})
+
+	// --- software updates ---
+	case "software_update":
+		// HA 'update' install press → install now (offset 0).
+		err = r.command(vin, "schedule_software_update", map[string]any{"offset_sec": 0})
+	case "cancel_update":
+		err = r.command(vin, "cancel_software_update", nil)
+
+	// --- navigation (direct Fleet API; not proxy-routed) ---
+	case "navigate":
+		err = r.navigate(vin, payload)
+
+	// --- PIN-gated ---
+	case "valet":
+		if r.valetPIN == "" {
+			r.log.Warn("valet command but no valet_pin configured")
+			return
+		}
+		err = r.command(vin, "set_valet_mode", map[string]any{"on": isOn(payload), "password": r.valetPIN})
+	case "speed_limit":
+		if r.speedPIN == "" {
+			r.log.Warn("speed_limit command but no speed_limit_pin configured")
+			return
+		}
+		if isOn(payload) {
+			err = r.command(vin, "speed_limit_activate", map[string]any{"pin": r.speedPIN})
+		} else {
+			err = r.command(vin, "speed_limit_deactivate", map[string]any{"pin": r.speedPIN})
+		}
+	case "speed_limit_value":
+		v, e := parseNum(payload)
+		if e != nil {
+			r.log.Warn("bad speed_limit_value payload", "payload", payload)
+			return
+		}
+		err = r.command(vin, "speed_limit_set_limit", map[string]any{"limit_mph": v})
+	case "pin_to_drive":
+		if r.drivePIN == "" {
+			r.log.Warn("pin_to_drive command but no pin_to_drive_pin configured")
+			return
+		}
+		err = r.command(vin, "set_pin_to_drive", map[string]any{"on": isOn(payload), "password": r.drivePIN})
+
+	default:
+		if pos, ok := seatPositions[key]; ok {
+			lvl := map[string]int{"off": 0, "low": 1, "medium": 2, "high": 3}[strings.ToLower(strings.TrimSpace(payload))]
+			err = r.command(vin, "remote_seat_heater_request", map[string]any{"seat_position": pos, "level": lvl})
+			break
+		}
+		r.log.Warn("unknown command key", "key", key)
+		return
+	}
+	if err != nil {
+		r.log.Error("command failed", "vin", vin, "key", key, "err", err)
+	} else {
+		r.log.Info("command sent", "vin", vin, "key", key)
+	}
+}
+
+// VehicleDisplayName fetches the car's owner-given name from the Fleet API
+// (GET /api/1/vehicles/{vin} → response.display_name). Does not wake the car.
+// Requires commands.fleet_api_url; returns "" if unavailable.
+func (r *Relay) VehicleDisplayName(vin string) (string, error) {
+	if r.fleetAPI == "" {
+		return "", fmt.Errorf("fleet_api_url not set")
+	}
+	tok, err := r.tm.token()
+	if err != nil {
+		return "", fmt.Errorf("token: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/1/vehicles/%s", r.fleetAPI, vin), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := r.apiClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 16384))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
+	}
+	var out struct {
+		Response struct {
+			DisplayName string `json:"display_name"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(rb, &out); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out.Response.DisplayName), nil
+}
+
+// latlon returns the vehicle's last-known GPS from the store.
+func (r *Relay) latlon(vin string) (float64, float64, bool) {
+	if r.store == nil {
+		return 0, 0, false
+	}
+	snap, ok := r.store.Snapshot(vin)
+	if !ok {
+		return 0, 0, false
+	}
+	return snap.Location()
+}
+
+func parseNum(p string) (float64, error) {
+	return strconv.ParseFloat(strings.TrimSpace(p), 64)
+}
+
+// navigate sends a destination (address or "lat,lon") to the car. navigation_request
+// is NOT end-to-end-signed, so it cannot go through the vehicle-command proxy — it is
+// POSTed directly to the regional Fleet API with the OAuth token.
+func (r *Relay) navigate(vin, destination string) error {
+	destination = strings.TrimSpace(destination)
+	if destination == "" {
+		return fmt.Errorf("empty destination")
+	}
+	if r.fleetAPI == "" {
+		return fmt.Errorf("commands.fleet_api_url not set — navigation unavailable")
+	}
+	tok, err := r.tm.token()
+	if err != nil {
+		return fmt.Errorf("token: %w", err)
+	}
+	body := map[string]any{
+		"type":         "share_ext_content_raw",
+		"locale":       "en-US",
+		"timestamp_ms": strconv.FormatInt(time.Now().UnixMilli(), 10),
+		"value":        map[string]any{"android.intent.extra.TEXT": destination},
+	}
+	b, _ := json.Marshal(body)
+	urlStr := fmt.Sprintf("%s/api/1/vehicles/%s/command/navigation_request", r.fleetAPI, vin)
+	req, err := http.NewRequest(http.MethodPost, urlStr, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.apiClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
+	}
+	return nil
+}
+
+func (r *Relay) command(vin, name string, body map[string]any) error {
+	return r.post(fmt.Sprintf("%s/api/1/vehicles/%s/command/%s", r.proxy, vin, name), body)
+}
+
+func (r *Relay) wake(vin string) error {
+	return r.post(fmt.Sprintf("%s/api/1/vehicles/%s/wake_up", r.proxy, vin), nil)
+}
+
+// Enroll pushes a fleet_telemetry_config to the vehicle-command proxy using the
+// relay's own OAuth token (no contention with the command relay's token). payload
+// is the raw fleet_telemetry_config JSON. A non-2xx response (including its body)
+// is returned as an error.
+func (r *Relay) Enroll(payload []byte) error {
+	tok, err := r.tm.token()
+	if err != nil {
+		return fmt.Errorf("token: %w", err)
+	}
+	urlStr := fmt.Sprintf("%s/api/1/vehicles/fleet_telemetry_config", r.proxy)
+	req, err := http.NewRequest(http.MethodPost, urlStr, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
+	}
+	return nil
+}
+
+func (r *Relay) post(urlStr string, body map[string]any) error {
+	tok, err := r.tm.token()
+	if err != nil {
+		return fmt.Errorf("token: %w", err)
+	}
+	var buf io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("marshal body: %w", err)
+		}
+		buf = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(http.MethodPost, urlStr, buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
+	}
+	return nil
+}
+
+func isOn(p string) bool {
+	switch strings.ToUpper(strings.TrimSpace(p)) {
+	case "ON", "TRUE", "1", "LOCK", "PRESS":
+		return true
+	}
+	return false
+}
+
+// coverOpen reports whether an HA cover payload requests opening (vs closing).
+func coverOpen(p string) bool {
+	return strings.EqualFold(strings.TrimSpace(p), "OPEN")
+}
+
+// ---- token manager ----
+
+type tokenManager struct {
+	cfg       config.Commands
+	cachePath string
+	log       *slog.Logger
+	client    *http.Client
+
+	mu      sync.Mutex
+	access  string
+	refresh string
+	expiry  time.Time
+}
+
+func newTokenManager(cfg config.Commands, log *slog.Logger) *tokenManager {
+	t := &tokenManager{
+		cfg:       cfg,
+		cachePath: cfg.TokenCache,
+		log:       log,
+		client:    &http.Client{Timeout: 20 * time.Second},
+		refresh:   cfg.RefreshToken,
+	}
+	// Cached (rotated) refresh token takes precedence over the configured one.
+	if t.cachePath != "" {
+		if b, err := os.ReadFile(t.cachePath); err == nil {
+			if cached := strings.TrimSpace(string(b)); cached != "" {
+				t.refresh = cached
+				log.Info("loaded refresh token from cache", "path", t.cachePath)
+			}
+		}
+	}
+	return t
+}
+
+// persist writes the current refresh token to the cache file (atomic rename).
+func (t *tokenManager) persist() {
+	if t.cachePath == "" {
+		return
+	}
+	tmp := t.cachePath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(t.refresh), 0o600); err != nil {
+		t.log.Warn("persist refresh token failed", "err", err)
+		return
+	}
+	if err := os.Rename(tmp, t.cachePath); err != nil {
+		t.log.Warn("persist refresh token rename failed", "err", err)
+		return
+	}
+	t.log.Info("persisted rotated refresh token", "path", t.cachePath)
+}
+
+// token returns a valid access token, refreshing if missing or near expiry.
+func (t *tokenManager) token() (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.access != "" && time.Until(t.expiry) > 60*time.Second {
+		return t.access, nil
+	}
+	if err := t.doRefresh(); err != nil {
+		return "", err
+	}
+	return t.access, nil
+}
+
+func (t *tokenManager) doRefresh() error {
+	endpoint := strings.TrimRight(t.cfg.AuthHost, "/") + t.cfg.AuthPath + "/token"
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("client_id", t.cfg.ClientID)
+	form.Set("refresh_token", t.refresh)
+	if t.cfg.ClientSecret != "" {
+		form.Set("client_secret", t.cfg.ClientSecret)
+	}
+	resp, err := t.client.PostForm(endpoint, form)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("refresh status %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
+	}
+	var out struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(rb, &out); err != nil {
+		return err
+	}
+	if out.AccessToken == "" {
+		return fmt.Errorf("refresh returned no access_token")
+	}
+	t.access = out.AccessToken
+	if out.RefreshToken != "" && out.RefreshToken != t.refresh {
+		// Tesla rotates the refresh token on use; persist it so restarts survive.
+		t.refresh = out.RefreshToken
+		t.persist()
+	}
+	ttl := out.ExpiresIn
+	if ttl <= 0 {
+		ttl = 28800 // 8h default
+	}
+	t.expiry = time.Now().Add(time.Duration(ttl) * time.Second)
+	t.log.Info("access token refreshed", "expires_in_s", ttl)
+	return nil
+}
