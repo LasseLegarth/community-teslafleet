@@ -214,7 +214,9 @@ func Defaults() Config {
 		SchemaVersion: SchemaVersion,
 		Ingest:        Ingest{ZMQAddr: "tcp://fleet-telemetry:5284", Namespace: "tesla_telemetry"},
 		HTTP:          HTTP{Listen: ":4460"},
-		FleetAPI:      FleetAPI{Enabled: true},
+		// Default profile is HA-only (see README). The Fleet API for TeslaMate is
+		// opt-in: set fleetapi_enabled (add-on) / TGW_FLEETAPI_ENABLED / fleetapi.enabled.
+		FleetAPI:      FleetAPI{Enabled: false},
 		HA: HA{
 			Enabled:                true,
 			ClientID:               "community-teslafleet",
