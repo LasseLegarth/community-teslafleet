@@ -345,9 +345,12 @@ func applyOptions(c *Config) {
 	if json.Unmarshal(b, &o) != nil {
 		return
 	}
+	optStr(o, "zmq_addr", &c.Ingest.ZMQAddr)
+	optStr(o, "namespace", &c.Ingest.Namespace)
 	optStr(o, "units_system", &c.Units.System)
 	optStr(o, "device_identifier", &c.HA.IdentifierMode)
 	optStr(o, "log_level", &c.LogLevel)
+	optBool(o, "fleetapi_enabled", &c.FleetAPI.Enabled)
 	optStr(o, "mqtt_broker", &c.HA.Broker)
 	optStr(o, "mqtt_username", &c.HA.Username)
 	optStr(o, "mqtt_password", &c.HA.Password)

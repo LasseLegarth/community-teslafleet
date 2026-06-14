@@ -2,28 +2,44 @@
 
 Publishes your Tesla into Home Assistant via MQTT auto-discovery, fed by a
 self-hosted Tesla Fleet Telemetry stream. Optionally also serves a local Tesla
-Fleet API for TeslaMate.
+Fleet API + WSS for TeslaMate (free polling that never wakes the car).
 
-> **Status: scaffold / WIP.** The standalone Docker image is the primary supported
-> path today (see the repo README). This add-on wrapper maps add-on options to the
-> gateway's `TGW_*` env vars via `run.sh` and is intended for the HA-only profile.
+This add-on runs the **same image** as the standalone Docker build; the gateway reads
+the add-on options directly. Configure everything in the **Configuration** tab.
 
 ## Prerequisites
 
-- Tesla [fleet-telemetry](https://github.com/teslamotors/fleet-telemetry) running
-  with an MQTT sink (route `V` and `connectivity` to `mqtt`, `transmit_decoded_records: true`).
-- An MQTT broker reachable from HA (e.g. the Mosquitto add-on, `core-mosquitto`).
+- A self-hosted Tesla [fleet-telemetry](https://github.com/teslamotors/fleet-telemetry)
+  server (it streams to the gateway over **brokerless ZMQ**), reachable from this add-on.
+- HA's MQTT integration / a broker — **auto-detected** from the Supervisor, so you
+  normally don't enter broker details.
+- Tesla partner onboarding (public domain, key, virtual-key pairing). See the repo
+  README — this is the real setup work; the gateway can't remove it.
 
 ## Options
 
 | Option | Meaning |
 |---|---|
-| `mqtt_broker` | Broker to CONSUME telemetry from |
-| `mqtt_topic_base` | Must match fleet-telemetry `namespace` |
+| `zmq_addr` | fleet-telemetry ZMQ address, e.g. `tcp://<host>:5284` |
+| `namespace` | must match fleet-telemetry `namespace` |
+| `units_system` | `metric` (km/°C/bar) or `imperial` (mi/°F/psi) — HA display |
+| `device_identifier` | `name` (slug → VIN out of entity_ids) or `vin` |
+| `telemetry_profile` | `eco` / `balanced` / `live` / `custom` — how often signals are fetched |
 | `fleetapi_enabled` | `true` only if you also run TeslaMate |
-| `ha_broker` | Broker to PUBLISH HA discovery to (usually the same) |
-| `vins` | Comma-separated VIN list |
-| `range_input` / `speed_input` / `odometer_input` | Units your telemetry emits |
+| `vins` | comma-separated VIN list |
+| `commands_enabled` | enable HA → car commands (needs a token via onboarding) |
+| `log_level` | debug / info / warn / error |
 
-Captured `vehicle_data` templates (optional, improves Fleet API fidelity) go in
-`/config/community_teslafleet/templates/<VIN>.json`.
+The MQTT broker is auto-configured from the Supervisor (`services: mqtt:want`). To
+override, set `TGW_HA_BROKER` etc. — but normally leave it.
+
+## Port
+
+`4460/tcp` exposes the Fleet API + WSS to your LAN so TeslaMate (on another host/LXC)
+can poll `http://<ha-host>:4460`. **LAN-only — never expose to the internet.** If you
+don't use TeslaMate, leave the port unmapped. Ensure host `:4460` is free.
+
+## Data
+
+Config, token cache and `ftc.json` persist in the add-on's `/data` (included in HA
+backups). Optional captured `vehicle_data` templates improve Fleet API fidelity.

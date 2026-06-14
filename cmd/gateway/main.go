@@ -28,6 +28,9 @@ func main() {
 	cfgPath := flag.String("config", envOr("TGW_CONFIG", "/config/config.yaml"), "path to config.yaml")
 	flag.Parse()
 
+	// HA add-on: auto-configure the MQTT broker from the Supervisor (no-op standalone).
+	config.DetectSupervisorMQTT()
+
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		slog.Error("config load failed", "err", err)
