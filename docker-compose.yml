@@ -1,0 +1,70 @@
+# community-teslafleet — full self-host stack (standalone, no Home Assistant add-on).
+#
+# Services:
+#   fleet-telemetry        Tesla's receiver. Vehicles dial IN over TLS; it fans records
+#                          out to the gateway over brokerless ZMQ. Owns the public port.
+#   vehicle-command-proxy  Signs HA→car commands with your private key (loopback only).
+#   gateway                This project: ZMQ ingest → Fleet API + WSS (TeslaMate) + HA MQTT.
+#
+# No MQTT broker is needed for ingest (ZMQ is brokerless); the gateway publishes HA
+# discovery to YOUR Home Assistant broker (TGW_HA_BROKER).
+#
+# Prerequisites (see README — these are the real work, not the gateway):
+#   - A public domain + TLS cert for the telemetry hostname (./certs/fullchain.pem + privkey.pem).
+#     Easiest with no open ports: certbot DNS-01 (e.g. certbot/dns-cloudflare). See README.
+#   - The partner public key hosted at https://<domain>/.well-known/appspecific/com.tesla.3p.public-key.pem
+#     (can be ANY static HTTPS host on your domain — Cloudflare/GitHub Pages, etc.).
+#   - ./proxy/ with private-key.pem + tls/cert.pem + tls/key.pem (the onboarding wizard generates these).
+# Copy .env.example → .env and fill it in first.
+
+name: community-teslafleet
+
+services:
+  fleet-telemetry:
+    image: tesla/fleet-telemetry:latest
+    restart: unless-stopped
+    command: ["-config=/etc/fleet-telemetry/config.json"]
+    ports:
+      - "${TELEMETRY_PORT:-443}:${TELEMETRY_PORT:-443}"   # vehicles connect here (TLS)
+    volumes:
+      - ./fleet-telemetry-config.json:/etc/fleet-telemetry/config.json:ro
+      - ./certs:/etc/certs:ro                              # fullchain.pem + privkey.pem
+
+  vehicle-command-proxy:
+    image: tesla/vehicle-command:latest
+    restart: unless-stopped
+    environment:
+      - TESLA_HTTP_PROXY_TLS_CERT=/config/tls/cert.pem
+      - TESLA_HTTP_PROXY_TLS_KEY=/config/tls/key.pem
+      - TESLA_HTTP_PROXY_HOST=0.0.0.0
+      - TESLA_HTTP_PROXY_PORT=4443
+      - TESLA_HTTP_PROXY_TIMEOUT=30s
+      - TESLA_KEY_FILE=/config/private-key.pem
+    volumes:
+      - ./proxy:/config:ro
+    ports:
+      - "127.0.0.1:4443:4443"                             # loopback only
+
+  gateway:
+    image: ghcr.io/legarth/community-teslafleet:latest    # or: build: .
+    restart: unless-stopped
+    depends_on: [fleet-telemetry]
+    ports:
+      - "4460:4460"                                        # Fleet API + WSS for TeslaMate (LAN-only)
+    volumes:
+      - ./data:/data                                       # config.yaml, token cache, ftc.json, recordings
+    environment:
+      - TGW_INGEST_ZMQ_ADDR=tcp://fleet-telemetry:5284
+      - TGW_INGEST_NAMESPACE=${TELEMETRY_NAMESPACE:-tesla_telemetry}
+      - TGW_VINS=${TGW_VINS}
+      - TGW_HA_BROKER=${TGW_HA_BROKER}
+      - TGW_HA_USERNAME=${TGW_HA_USERNAME:-}
+      - TGW_HA_PASSWORD=${TGW_HA_PASSWORD:-}
+      - TGW_UNITS_SYSTEM=${TGW_UNITS_SYSTEM:-metric}
+      - TGW_FLEETAPI_ENABLED=${TGW_FLEETAPI_ENABLED:-true}
+      - TGW_COMMANDS_ENABLED=${TGW_COMMANDS_ENABLED:-true}
+      - TGW_TESLA_PROXY_URL=https://vehicle-command-proxy:4443
+      - TGW_TESLA_CLIENT_ID=${TGW_TESLA_CLIENT_ID:-}
+      - TGW_TESLA_CLIENT_SECRET=${TGW_TESLA_CLIENT_SECRET:-}
+      - TGW_TESLA_REFRESH_TOKEN=${TGW_TESLA_REFRESH_TOKEN:-}
+      - TGW_TESLA_FLEET_API_URL=${TGW_TESLA_FLEET_API_URL:-}

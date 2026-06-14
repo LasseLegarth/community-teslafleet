@@ -9,6 +9,18 @@ stream into:
 
 It is the open, self-hosted equivalent of the closed `api.myteslamate.com`.
 
+## Who is this for
+
+**Use this if** you self-host TeslaMate, want to own all your data, won't pay a
+hosted service, and **already run public-facing infra** (a domain + a way to be
+publicly reachable). Tesla requires a public domain and a publicly-reachable
+telemetry endpoint — that part can't be removed, only made as easy as the platform
+allows (this project includes a guided onboarding wizard).
+
+**Use something else if** you just want easy Tesla data in HA → the
+[Teslemetry](https://teslemetry.com) integration (~$2.50/mo, no partner onboarding),
+or you can't be publicly reachable at all.
+
 ## Why
 
 Tesla's Fleet API bills `vehicle_data` polling, and TeslaMate refuses to let a
@@ -37,20 +49,46 @@ gateway is only an MQTT *client* when publishing to Home Assistant's broker.
 - **Full** — `fleetapi.enabled: true`. Also serves TeslaMate; set TeslaMate's
   `TESLA_API_HOST=http://<gateway-host>:4460`.
 
-## Quick start (standalone)
+## Install
 
-1. Run Tesla's [fleet-telemetry](https://github.com/teslamotors/fleet-telemetry)
-   with a **zmq** dispatcher: `transmit_decoded_records: true`, route `V` and
-   `connectivity` to `zmq`, and set the zmq `addr` to `tcp://0.0.0.0:5284`.
-2. Capture a vehicle_data template — see [`templates/README.md`](templates/README.md).
-3. `cp config.example.yaml config.yaml`, edit broker/VIN, then:
-   ```bash
-   docker compose -f docker-compose.example.yml up -d
-   ```
-4. **TeslaMate**: set `TESLA_API_HOST=http://<gateway-host>:4460` and
-   `TESLA_WSS_HOST=ws://<gateway-host>:4460` (same port; the gateway serves both the
-   Fleet API and the legacy `/streaming/` WebSocket for near-instant drive
-   detection). Keep `TESLA_AUTH_HOST` and your token. Polling is now local and free.
+### Home Assistant add-on (easiest for HA users)
+Add this repo as an add-on repository (Settings → Add-ons → ⋮ → Repositories →
+`https://github.com/legarth/community-teslafleet`), install **Community TeslaFleet**,
+and configure it in the **Configuration** tab. The MQTT broker is auto-detected from
+HA. Requires HA OS / Supervised. (HA Container/Core → use standalone below.)
+
+### Standalone — full stack (`docker-compose.yml`)
+Brings up `fleet-telemetry` + `vehicle-command-proxy` + the gateway:
+```bash
+cp .env.example .env        # fill in domain, VIN, HA broker
+cp fleet-telemetry-config.example.json fleet-telemetry-config.json
+docker compose up -d
+```
+Then run the **onboarding wizard** (token, partner key, per-car pairing) — see below.
+
+**TeslaMate**: set `TESLA_API_HOST=http://<gateway-host>:4460` and
+`TESLA_WSS_HOST=ws://<gateway-host>:4460` (same port serves the Fleet API and the
+legacy `/streaming/` WebSocket). Keep `TESLA_AUTH_HOST` + your token. Polling is now
+local and free.
+
+## Connectivity (lowering the public-HTTPS barrier)
+
+Tesla needs a public domain + a reachable telemetry endpoint. You don't need to run
+Caddy or use port 443:
+
+- **Custom port** — set `TELEMETRY_PORT` (e.g. `8443`); the car connects to `host:port`.
+- **TLS with no open ports** — obtain the telemetry cert via **certbot DNS-01** (no
+  HTTP challenge), e.g.:
+  ```bash
+  docker run --rm -v "$PWD/certs:/out" -v "$PWD/cf.ini:/cf.ini:ro" \
+    certbot/dns-cloudflare certonly --dns-cloudflare \
+    --dns-cloudflare-credentials /cf.ini -d telemetry.example.com \
+    --config-dir /out --work-dir /out --logs-dir /out
+  ```
+  …then point `./certs/{fullchain,privkey}.pem` at the issued files.
+- **The `.well-known` public key** is a static file — host it on **any** HTTPS host on
+  your domain (Cloudflare/GitHub Pages), not necessarily this server.
+- **No open ports / CGNAT** — put the telemetry endpoint behind a **Cloudflare Tunnel**.
 
 ## Configuration
 
@@ -60,9 +98,14 @@ All options are in [`config.example.yaml`](config.example.yaml) and mirrored as
 
 ## Status
 
-v1: Fleet API emulation + Home Assistant discovery. Roadmap: command relay
-(HA → car), a config UI for per-field stream intervals + enrollment, and a
-guided onboarding/token wizard.
+Working: Fleet API + WSS emulation (TeslaMate), Home Assistant discovery for all
+streamed telemetry on proper HA domains (sensors, covers, climate, device_tracker),
+metric/imperial units, and a full command relay (HA → car: charging, climate, covers,
+seats, navigation, software update, …). One image runs as an HA add-on or standalone.
+
+Roadmap: a guided **onboarding wizard** (partner key, OAuth token, per-car virtual-key
+pairing, telemetry enrollment) and a per-field stream-interval + cost-estimate UI.
+See [`docs/design-distribution-config-ui.md`](docs/design-distribution-config-ui.md).
 
 ## License
 
