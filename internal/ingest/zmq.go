@@ -136,29 +136,25 @@ func (c *Consumer) Stop() {
 }
 
 func (c *Consumer) loop() {
-	const reconnectAfter = 5 // consecutive recv errors before re-dialing
-	consecErrs := 0
 	for {
 		msg, err := c.sub.Recv()
 		if err != nil {
 			if c.ctx.Err() != nil {
 				return
 			}
-			consecErrs++
-			c.log.Warn("zmq recv error", "err", err, "consecutive", consecErrs)
-			if consecErrs >= reconnectAfter {
-				// Persistent fault on the socket: tear down and re-dial instead of
-				// spinning on a faulted socket forever.
-				if !c.reconnect() {
-					return // context cancelled
-				}
-				consecErrs = 0
-				continue
+			// A recv error means the PUB peer's connection faulted (e.g.
+			// fleet-telemetry restarted). go-zeromq surfaces the fault exactly
+			// once and then blocks forever on the next Recv(), so we must
+			// re-dial on the FIRST error — waiting for repeated errors would
+			// wedge ingest permanently on a dead socket. reconnect() has its
+			// own backoff, so an unnecessary reconnect on a transient error is
+			// cheap.
+			c.log.Warn("zmq recv error — reconnecting", "err", err)
+			if !c.reconnect() {
+				return // context cancelled
 			}
-			time.Sleep(time.Second)
 			continue
 		}
-		consecErrs = 0
 		c.handle(msg)
 	}
 }
