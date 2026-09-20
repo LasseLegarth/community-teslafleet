@@ -36,6 +36,8 @@ site / phone (clearly marked).</p>
   <form method="post" action="{{.Base}}/domain">
     <label>Public domain (optionally <code>host:port</code>)</label>
     <input name="domain" value="{{.State.Domain}}" placeholder="telemetry.example.com">
+    <label>Fleet API URL</label>
+    <input name="fleet_api" value="{{.State.FleetAPI}}" placeholder="https://fleet-api.prd.eu.vn.cloud.tesla.com">
     <label>Client ID</label>
     <input name="client_id" value="{{.State.ClientID}}" placeholder="xxxxxxxx-....">
     <label>Client Secret {{if .State.SecretSet}}<span class="muted">(stored — leave blank to keep)</span>{{end}}</label>
