@@ -37,6 +37,7 @@ type Options struct {
 // client secret live in separate 0600 files).
 type State struct {
 	Domain      string         `json:"domain"`
+	FleetAPI    string         `json:"fleet_api"`
 	ClientID    string         `json:"client_id"`
 	HasKeys     bool           `json:"has_keys"`
 	SecretSet   bool           `json:"secret_set"`
@@ -128,7 +129,11 @@ func NewServer(opts Options, log *slog.Logger) (*Server, error) {
 
 // client builds a Tesla API client from config + the wizard's stored creds.
 func (s *Server) client() *teslaClient {
-	return newTeslaClient(s.opts.AuthHost, s.opts.AuthPath, s.opts.FleetAPI,
+	fapi := s.store.st.FleetAPI
+	if fapi == "" {
+		fapi = s.opts.FleetAPI
+	}
+	return newTeslaClient(s.opts.AuthHost, s.opts.AuthPath, fapi,
 		s.store.st.ClientID, s.store.clientSecret())
 }
 
@@ -217,6 +222,9 @@ func (s *Server) saveDomain(w http.ResponseWriter, r *http.Request) {
 	s.store.mu.Lock()
 	s.store.st.Domain = strings.TrimSpace(r.FormValue("domain"))
 	s.store.st.ClientID = strings.TrimSpace(r.FormValue("client_id"))
+	if fapi := strings.TrimSpace(r.FormValue("fleet_api")); fapi != "" {
+		s.store.st.FleetAPI = fapi
+	}
 	if sec := strings.TrimSpace(r.FormValue("client_secret")); sec != "" {
 		if err := s.store.saveSecret(sec); err == nil {
 			s.store.st.SecretSet = true
@@ -268,9 +276,12 @@ func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) registerPartner(w http.ResponseWriter, r *http.Request) {
 	s.store.mu.Lock()
-	domain, clientID := s.store.st.Domain, s.store.st.ClientID
+	domain, clientID, fapi := s.store.st.Domain, s.store.st.ClientID, s.store.st.FleetAPI
 	s.store.mu.Unlock()
-	if domain == "" || clientID == "" || s.store.clientSecret() == "" || s.opts.FleetAPI == "" {
+	if fapi == "" {
+		fapi = s.opts.FleetAPI
+	}
+	if domain == "" || clientID == "" || s.store.clientSecret() == "" || fapi == "" {
 		s.render(w, r, "✗ Need domain, client_id, client_secret and a Fleet API URL first.")
 		return
 	}
@@ -343,7 +354,18 @@ func (s *Server) saveEnrollment(w http.ResponseWriter, r *http.Request) {
 	s.store.mu.Unlock()
 
 	ftc := enroll.Generate(profile, domain, port)
-	b, err := json.MarshalIndent(ftc, "", "  ")
+	s.store.mu.Lock()
+	var vins []string
+	for _, v := range s.store.st.Vehicles {
+		vins = append(vins, v.VIN)
+	}
+	s.store.mu.Unlock()
+	
+	payload := map[string]any{
+		"config": ftc,
+		"vins":   vins,
+	}
+	b, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		s.render(w, r, "✗ Could not build config: "+err.Error())
 		return
